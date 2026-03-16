@@ -81,3 +81,6 @@ cargo run --bin gen
 ```
 
 Writes `admissible_monomials.txt` to the working directory, listing every admissible monomial by degree up to degree 20. To change the cutoff, edit `N_MAX` in `src/bin/gen.rs`.
+
+
+Yes, a lot of this was vibe coded. Parsers are a solved problem, and the rest is just recursively evaluating expressions; I'll write artisanal code when the problem I'm solving requires it.
