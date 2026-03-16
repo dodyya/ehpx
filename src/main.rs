@@ -1,0 +1,193 @@
+#![allow(dead_code)]
+
+mod repl;
+
+use std::ops::{Add, Mul};
+use std::collections::HashSet;
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub(crate) struct Admissible(pub(crate) Vec<usize>);
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub(crate) struct Monomial {
+    pub(crate) seq: Admissible,
+    pub(crate) deg: usize,
+}
+
+#[derive(PartialEq, Eq, Clone)]
+pub(crate) struct Element(pub(crate) HashSet<Monomial>);
+
+impl Admissible {
+    pub fn new(seq: &[usize]) -> Option<Self> {
+        for (i, j) in seq.iter().zip(seq.iter().skip(1)) {
+            if *j > 2 * i {
+                return None;
+            }
+        }
+        if seq.iter().any(|&x| x == 0) {
+            return None;
+        }
+        Some(Admissible(seq.to_vec()))
+    }
+}
+
+impl Monomial {
+    pub fn new(seq: &[usize]) -> Option<Self> {
+        Some(Self {
+            seq: Admissible::new(seq)?,
+            deg: seq.into_iter().sum(),
+        })
+    }
+}
+
+impl Element {
+    pub fn new(seq: &[usize]) -> Option<Self> {
+        let mono = Monomial::new(seq)?;
+        let mut set = HashSet::new();
+        set.insert(mono);
+        Some(Self(set))
+    }
+
+    pub fn zero() -> Self {
+        Self(HashSet::new())
+    }
+
+    pub fn add_mono(&mut self, mono: Monomial){
+        if !self.0.remove(&mono) {
+            self.0.insert(mono);
+        }
+    }
+
+    pub fn diff(self) -> Self {
+        let mut result = Element::zero();
+        for mono in self.0 {
+            result = result + diff_mono(&mono.seq.0);
+        }
+        result
+    }
+}
+
+// d([i]) = sum_{j=1}^{floor(i/2)} binom(i-j, j) % 2 * [i-j, j-1]
+// where [0] = unit, so j=1 produces [i-1] alone.
+// All terms with j >= 2 are admissible: j-1 <= 2*(i-j) follows from j <= i/2.
+fn diff_generator(i: usize) -> Element {
+    let mut result = Element::zero();
+    for j in 1..=(i / 2) {
+        if binom_mod2(i - j, j) {
+            let term = if j == 1 {
+                Element::new(&[i - 1]).unwrap()  // [i-1] * unit
+            } else {
+                Element::new(&[i - j, j - 1]).unwrap()
+            };
+            result = result + term;
+        }
+    }
+    result
+}
+
+// Leibniz: d(xy) = x*dy + dx*y, splitting seq near the middle.
+fn diff_mono(seq: &[usize]) -> Element {
+    match seq.len() {
+        0 => Element::zero(),
+        1 => diff_generator(seq[0]),
+        n => {
+            let mid = n / 2;
+            let (x_seq, y_seq) = seq.split_at(mid);
+            let x = Element(HashSet::from([Monomial {
+                seq: Admissible(x_seq.to_vec()),
+                deg: x_seq.iter().sum(),
+            }]));
+            let y = Element(HashSet::from([Monomial {
+                seq: Admissible(y_seq.to_vec()),
+                deg: y_seq.iter().sum(),
+            }]));
+            let dx = diff_mono(x_seq);
+            let dy = diff_mono(y_seq);
+            x.clone() * dy + dx * y.clone()
+        }
+    }
+}
+
+impl Add for Element{
+    type Output = Element;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        let mut result = self.clone();
+        for item in rhs.0 {
+            result.add_mono(item);
+        }
+        result
+    }
+}
+
+impl Mul for Monomial {
+    type Output = Element;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        let admissible_junction = match (self.seq.0.last(), rhs.seq.0.first()) {
+            (Some(&l), Some(&r)) => r <= 2 * l,
+            _ => true,
+        };
+        if admissible_junction {
+            let seq: Vec<usize> = self.seq.0.iter().chain(&rhs.seq.0).copied().collect();
+            let mono = Monomial { deg: self.deg + rhs.deg, seq: Admissible(seq) };
+            let mut set = HashSet::new();
+            set.insert(mono);
+            Element(set)
+        } else {
+            // [a,...,y,z]*[v,w,...,p] = [a,...,y] * ([z]*[v]) * [w,...,p]
+            // [n]*[2n+i+1] = sum_(j=0)^((i-1)/2){ (binom(i-j-1, j) % 2)*[n+i-j]*[2n+j+1] }
+            let z = *self.seq.0.last().unwrap();
+            let v = *rhs.seq.0.first().unwrap();
+            let left_prefix = Monomial {
+                seq: Admissible(self.seq.0[..self.seq.0.len() - 1].to_vec()),
+                deg: self.deg - z,
+            };
+            let right_suffix = Monomial {
+                seq: Admissible(rhs.seq.0[1..].to_vec()),
+                deg: rhs.deg - v,
+            };
+            let middle = adem(z, v);
+            Element(HashSet::from([left_prefix])) * middle * Element(HashSet::from([right_suffix]))
+        }
+    }
+}
+
+fn binom_mod2(n: usize, k: usize) -> bool {
+    n & k == k
+}
+
+fn adem(n: usize, b: usize) -> Element {
+    // [n]*[b] where b > 2n; write b = 2n+i+1 so i = b-2n-1 >= 0
+    let i = b - 2 * n - 1;
+    let mut result = Element::zero();
+    if i == 0 {
+        return result;
+    }
+    for j in 0..=(i - 1) / 2 {
+        if binom_mod2(i - j - 1, j) {
+            let left = Monomial { seq: Admissible(vec![n + i - j]), deg: n + i - j };
+            let right = Monomial { seq: Admissible(vec![2 * n + j + 1]), deg: 2 * n + j + 1 };
+            result = result + left * right;
+        }
+    }
+    result
+}
+
+impl Mul for Element {
+    type Output = Element;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        let mut result = Element::zero();
+        for l in &self.0 {
+            for r in &rhs.0 {
+                result = result + l.clone() * r.clone();
+            }
+        }
+        result
+    }
+}
+
+fn main() {
+    repl::run();
+}
