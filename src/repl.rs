@@ -1,30 +1,5 @@
-use std::fmt;
 use std::io::{self, BufRead, Write};
-use super::{Element, Monomial};
-
-// ── Display ───────────────────────────────────────────────────────────────────
-
-impl fmt::Display for Monomial {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.seq.0.is_empty() {
-            return write!(f, "1");
-        }
-        let inner: Vec<String> = self.seq.0.iter().map(|n| n.to_string()).collect();
-        write!(f, "λ_({})", inner.join(", "))
-    }
-}
-
-impl fmt::Display for Element {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.is_empty() {
-            return write!(f, "0");
-        }
-        let mut terms: Vec<&Monomial> = self.0.iter().collect();
-        terms.sort_by(|a, b| a.deg.cmp(&b.deg).then_with(|| a.seq.0.cmp(&b.seq.0)));
-        let strs: Vec<String> = terms.iter().map(|m| m.to_string()).collect();
-        write!(f, "{}", strs.join(" + "))
-    }
-}
+use ehpx::Element;
 
 // ── Lexer ─────────────────────────────────────────────────────────────────────
 
@@ -80,7 +55,7 @@ impl Lexer {
                 Some('d') => { self.advance(); Token::D }
                 Some(c) if c.is_ascii_digit() => {
                     let mut s = String::new();
-                    while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                    while self.peek().map_or(false, |ch| ch.is_ascii_digit()) {
                         s.push(self.advance().unwrap());
                     }
                     Token::Number(
