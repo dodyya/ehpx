@@ -354,9 +354,7 @@ impl CurtisTable {
 
     /// Render the Curtis table to a string for terminal display.
     pub fn display(&self, max_stem: usize) -> String {
-        let mut out = String::new();
-
-        // ANSI colour codes
+        // ANSI
         const RED: &str = "\x1b[31m";
         const GRN: &str = "\x1b[32m";
         const YEL: &str = "\x1b[33m";
@@ -365,77 +363,7 @@ impl CurtisTable {
         const BLD: &str = "\x1b[1m";
         const RST: &str = "\x1b[0m";
 
-        // ── Title ────────────────────────────────────────────────────────────
-        out.push_str(&format!(
-            "\n{BLD}{CYN}Curtis table  ·  EHP spectral sequence  ·  stems 0..{}{RST}\n",
-            max_stem
-        ));
-        out.push_str(&format!(
-            "{DIM}  {GRN}● cycle{RST}  {DIM}{RED}─▸ source{RST}  {DIM}{YEL}▸─ target{RST}\n\n"
-        ));
-
-        // ── Column-by-column view ────────────────────────────────────────────
-        for k in 0..=max_stem {
-            let rows = match self.entries.get(&k) {
-                Some(col) => col,
-                None => continue,
-            };
-
-            out.push_str(&format!("{BLD}stem {k}{RST}"));
-
-            // Differentials originating here
-            let _diffs: Vec<&Differential> = self.differentials
-                .get(&k)
-                .map(|v| v.iter().collect())
-                .unwrap_or_default();
-
-            // Column entries, sorted by row descending (high filtration first)
-            let mut row_keys: Vec<usize> = rows.keys().copied().collect();
-            row_keys.sort_unstable();
-            row_keys.reverse();
-
-            let mut first = true;
-            for &row in &row_keys {
-                let entries = &rows[&row];
-                for seq in entries {
-                    let sep = if first { "  " } else { ", " };
-                    first = false;
-
-                    let s = format_seq(seq);
-                    if self.is_source(seq) {
-                        // Find the target
-                        let tgt = self.source_set.get(seq).unwrap();
-                        let tgt_row = self.row_of(tgt).unwrap_or(0);
-                        out.push_str(&format!(
-                            "{sep}{RED}{s}{RST}{DIM}(n={row}){RST} {RED}─▸{RST} {YEL}{}{RST}{DIM}(n={tgt_row}){RST}",
-                            format_seq(tgt),
-                        ));
-                    } else if self.is_target(seq) {
-                        // already printed as part of the source above
-                    } else {
-                        out.push_str(&format!("{sep}{GRN}{s}{RST}{DIM}(n={row}){RST}"));
-                    }
-                }
-            }
-            out.push('\n');
-        }
-
-        // ── Survivors summary ────────────────────────────────────────────────
-        out.push_str(&format!("\n{BLD}{CYN}Survivors  ·  H*(Λ) cycle candidates{RST}\n"));
-
-        for k in 0..=max_stem {
-            let survs = self.survivors(k, usize::MAX);
-            if survs.is_empty() {
-                continue;
-            }
-            let list: Vec<String> = survs.iter().map(|s| {
-                let r = self.row_of(s).unwrap_or(0);
-                format!("{GRN}{}{RST}{DIM}(n={r}){RST}", format_seq(s))
-            }).collect();
-            out.push_str(&format!("  {BLD}k={k}{RST}  {}\n", list.join("  ")));
-        }
-
-        // ── Grid view (compact) ─────────────────────────────────────────────
+        let mut out = String::new();
         let mut max_row = 0usize;
         for col in self.entries.values() {
             for &r in col.keys() {
@@ -444,106 +372,169 @@ impl CurtisTable {
         }
         if max_row == 0 { max_row = 1; }
 
-        out.push_str(&format!("\n{BLD}{CYN}Grid{RST}  {DIM}(row n × stem k){RST}\n"));
+        // ── 1. Dot chart  (n vs k, one char per generator) ──────────────────
+        //
+        //  Each cell gets a count of generators:
+        //    .  = empty
+        //    o  = 1 cycle (green)
+        //    2  = 2 cycles, etc.
+        //    x  = 1 source (red), X = mixed source+cycle
+        //    *  = 1 target (yellow)
+        //  This keeps columns to a fixed 4-char width so alignment is trivial.
 
-        // Determine column widths
-        let label_w = 5;
-        let mut col_widths: Vec<usize> = Vec::new();
+        out.push_str(&format!(
+            "\n{BLD}{CYN} Curtis table — EHP spectral sequence — stems 0..{}{RST}\n",
+            max_stem,
+        ));
+        out.push_str(&format!(
+            " {DIM}{GRN}o{RST}{DIM}=cycle  {RED}x{RST}{DIM}=source  {YEL}*{RST}{DIM}=target  number=count{RST}\n\n",
+        ));
+
+        let cw = 4usize; // fixed column width
+
+        // Header row
+        out.push_str(&format!("{:>4} |", "n\\k"));
         for k in 0..=max_stem {
-            let mut w = format!("{}", k).len().max(1);
-            for row in 1..=max_row {
-                let cell_w = self.cell_text(k, row).chars().count();
-                w = w.max(cell_w);
-            }
-            col_widths.push(w + 2); // padding
-        }
-
-        // Header
-        out.push_str(&format!("{:>label_w$} ", "n\\k"));
-        for (k, &cw) in col_widths.iter().enumerate() {
-            out.push_str(&format!("{BLD}{:^cw$}{RST}", k));
+            out.push_str(&format!("{:^cw$}", k));
         }
         out.push('\n');
 
         // Separator
-        out.push_str(&format!("{:─>label_w$}─", ""));
-        for &cw in &col_widths {
-            out.push_str(&"─".repeat(cw));
+        out.push_str("-----+");
+        for _ in 0..=max_stem {
+            out.push_str("----");
         }
         out.push('\n');
 
-        // Rows
+        // Body rows, high n first
         for row in (1..=max_row).rev() {
-            out.push_str(&format!("{DIM}{:>label_w$}{RST} ", row));
-            for (k, &cw) in col_widths.iter().enumerate() {
-                let cell = self.cell_text(k, row);
-                if cell == "·" {
-                    out.push_str(&format!("{DIM}{:^cw$}{RST}", "·"));
-                } else {
-                    out.push_str(&format!("{:^cw$}", self.cell_coloured(k, row)));
-                }
+            out.push_str(&format!("{:>4} |", row));
+            for k in 0..=max_stem {
+                let glyph = self.cell_glyph(k, row);
+                // glyph is (visible_char, ansi_colour)
+                let pad_l = (cw - 1) / 2;
+                let pad_r = cw - 1 - pad_l;
+                out.push_str(&format!(
+                    "{}{}{}{}{RST}{}",
+                    " ".repeat(pad_l),
+                    glyph.1, // colour
+                    glyph.0, // char
+                    if glyph.1.is_empty() { "" } else { RST },
+                    " ".repeat(pad_r),
+                ));
             }
             out.push('\n');
         }
         out.push('\n');
+
+        // ── 2. Differentials ────────────────────────────────────────────────
+        out.push_str(&format!("{BLD}{CYN} Differentials{RST}\n"));
+        let mut any = false;
+        for k in 0..=max_stem {
+            if let Some(diffs) = self.differentials.get(&k) {
+                for d in diffs {
+                    any = true;
+                    out.push_str(&format!(
+                        "  {DIM}k={}{RST}  {RED}{}{RST} {DIM}(n={})  -->  {RST}{YEL}{}{RST} {DIM}(n={}){RST}\n",
+                        d.stem,
+                        format_seq(&d.source), d.source_row,
+                        format_seq(&d.target), d.target_row,
+                    ));
+                }
+            }
+        }
+        if !any { out.push_str(&format!("  {DIM}(none){RST}\n")); }
+        out.push('\n');
+
+        // ── 3. Per-stem detail ──────────────────────────────────────────────
+        out.push_str(&format!("{BLD}{CYN} Detail by stem{RST}\n"));
+        for k in 0..=max_stem {
+            let col = match self.entries.get(&k) {
+                Some(c) => c,
+                None => continue,
+            };
+            // Collect all entries with status
+            let mut lines: Vec<String> = Vec::new();
+            let mut row_keys: Vec<usize> = col.keys().copied().collect();
+            row_keys.sort_unstable();
+            for &row in &row_keys {
+                for seq in &col[&row] {
+                    let s = format_seq(seq);
+                    if self.is_source(seq) {
+                        let tgt = self.source_set.get(seq).unwrap();
+                        let tr = self.row_of(tgt).unwrap_or(0);
+                        lines.push(format!(
+                            "    {RED}{s}{RST} {DIM}n={row}  -->  {RST}{YEL}{}{RST} {DIM}n={tr}{RST}",
+                            format_seq(tgt),
+                        ));
+                    } else if self.is_target(seq) {
+                        // printed with its source
+                    } else {
+                        lines.push(format!(
+                            "    {GRN}{s}{RST} {DIM}n={row}{RST}",
+                        ));
+                    }
+                }
+            }
+            if lines.is_empty() { continue; }
+            out.push_str(&format!("  {BLD}k={k}{RST}\n"));
+            for l in &lines {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+
+        // ── 4. Survivors ────────────────────────────────────────────────────
+        out.push_str(&format!("{BLD}{CYN} Survivors — H*(Lambda) cycle candidates{RST}\n"));
+        for k in 0..=max_stem {
+            let survs = self.survivors(k, usize::MAX);
+            if survs.is_empty() { continue; }
+            let mut items: Vec<String> = survs.iter().map(|s| {
+                let r = self.row_of(s).unwrap_or(0);
+                format!("{GRN}{}{RST}{DIM}(n={r}){RST}", format_seq(s))
+            }).collect();
+            items.sort();
+            out.push_str(&format!("  {BLD}k={k:<3}{RST} {}\n", items.join("  ")));
+        }
+        out.push('\n');
+
         out
     }
 
-    /// Plain-text cell content (no ANSI).
-    fn cell_text(&self, stem: usize, row: usize) -> String {
-        let entries = self.entries
-            .get(&stem)
-            .and_then(|col| col.get(&row))
-            .cloned()
-            .unwrap_or_default();
-        if entries.is_empty() {
-            return "·".to_string();
-        }
-        let mut parts: Vec<String> = entries.iter()
-            .filter(|seq| !self.is_target(seq))   // targets shown inline
-            .map(|seq| format_seq(seq))
-            .collect();
-        parts.sort();
-        if parts.is_empty() {
-            // all entries are targets — show them dimmed
-            let mut t: Vec<String> = entries.iter().map(|seq| format_seq(seq)).collect();
-            t.sort();
-            t.join(" ")
-        } else {
-            parts.join(" ")
-        }
-    }
-
-    /// ANSI-coloured cell content for the grid.
-    fn cell_coloured(&self, stem: usize, row: usize) -> String {
+    /// Produce a (char, ansi_colour) pair for one cell in the dot chart.
+    fn cell_glyph(&self, stem: usize, row: usize) -> (char, &'static str) {
         const RED: &str = "\x1b[31m";
         const GRN: &str = "\x1b[32m";
         const YEL: &str = "\x1b[33m";
         const DIM: &str = "\x1b[2m";
-        const RST: &str = "\x1b[0m";
 
-        let entries = self.entries
-            .get(&stem)
-            .and_then(|col| col.get(&row))
-            .cloned()
-            .unwrap_or_default();
-        if entries.is_empty() {
-            return format!("{DIM}·{RST}");
+        let entries = match self.entries.get(&stem).and_then(|c| c.get(&row)) {
+            Some(v) => v,
+            None => return ('.', DIM),
+        };
+        if entries.is_empty() { return ('.', DIM); }
+
+        let mut n_cycle = 0u32;
+        let mut n_src = 0u32;
+        let mut n_tgt = 0u32;
+        for seq in entries {
+            if self.is_source(seq) { n_src += 1; }
+            else if self.is_target(seq) { n_tgt += 1; }
+            else { n_cycle += 1; }
         }
-        let mut parts: Vec<String> = Vec::new();
-        let mut sorted: Vec<Vec<usize>> = entries;
-        sorted.sort();
-        for seq in &sorted {
-            let s = format_seq(seq);
-            if self.is_source(seq) {
-                parts.push(format!("{RED}{s}→{RST}"));
-            } else if self.is_target(seq) {
-                parts.push(format!("{YEL}→{s}{RST}"));
-            } else {
-                parts.push(format!("{GRN}{s}{RST}"));
-            }
+        let total = n_cycle + n_src + n_tgt;
+
+        if n_src > 0 && n_cycle == 0 && n_tgt == 0 {
+            if n_src == 1 { ('x', RED) } else { (char_digit(n_src), RED) }
+        } else if n_tgt > 0 && n_cycle == 0 && n_src == 0 {
+            if n_tgt == 1 { ('*', YEL) } else { (char_digit(n_tgt), YEL) }
+        } else if n_cycle > 0 && n_src == 0 && n_tgt == 0 {
+            if n_cycle == 1 { ('o', GRN) } else { (char_digit(n_cycle), GRN) }
+        } else {
+            // mixed
+            (char_digit(total), GRN)
         }
-        parts.join(" ")
     }
 }
 
@@ -587,6 +578,10 @@ fn lex_leading(elem: &Element) -> Vec<usize> {
 /// Return the lex-leading monomial's sequence from an Element.
 fn lex_leading_element(elem: &Element) -> Vec<usize> {
     lex_leading(elem)
+}
+
+fn char_digit(n: u32) -> char {
+    if n <= 9 { char::from_digit(n, 10).unwrap() } else { '#' }
 }
 
 fn format_seq(seq: &[usize]) -> String {
