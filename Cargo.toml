@@ -5,3 +5,4 @@ edition = "2024"
 default-run = "ehpx"
 
 [dependencies]
+smallvec = "1.13"

@@ -11,7 +11,8 @@
 // Visualization prints the table to the terminal.
 
 use std::collections::{BTreeMap, HashMap};
-use crate::{Admissible, Element, Monomial};
+use crate::{Admissible, Element, Monomial, Seq};
+use smallvec::smallvec;
 
 // ── Table types ──────────────────────────────────────────────────────────────
 
@@ -193,14 +194,14 @@ impl CurtisTable {
                 // Multiply on the left by λ_{n-1}: prepend (n-1) to the sequence,
                 // then reduce to admissible form via the algebra multiplication.
                 let prefix = Monomial {
-                    seq: Admissible(vec![n - 1]),
+                    seq: Admissible(smallvec![n - 1]),
                     deg: n - 1,
                 };
                 let body = seq_to_element(&s);
                 let product = Element::from(prefix) * body;
                 // Each monomial in the product is an entry in row n.
                 for mono in &product.0 {
-                    self.insert_entry(k, n, mono.seq.0.clone());
+                    self.insert_entry(k, n, mono.seq.0.to_vec());
                 }
             }
         }
@@ -322,13 +323,13 @@ impl CurtisTable {
         let survs = self.survivors(prev_stem, cutoff);
         for s in survs {
             let prefix = Monomial {
-                seq: Admissible(vec![1]),
+                seq: Admissible(smallvec![1]),
                 deg: 1,
             };
             let body = seq_to_element(&s);
             let product = Element::from(prefix) * body;
             for mono in &product.0 {
-                self.insert_entry(k, 2, mono.seq.0.clone());
+                self.insert_entry(k, 2, mono.seq.0.to_vec());
             }
         }
     }
@@ -556,40 +557,23 @@ impl CurtisTable {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn seq_to_element(seq: &[usize]) -> Element {
-    if seq.is_empty() {
-        // The unit: single monomial with empty sequence, degree 0.
-        let mono = Monomial { seq: Admissible(vec![]), deg: 0 };
-        let mut s = std::collections::HashSet::new();
-        s.insert(mono);
-        Element(s)
-    } else {
-        let mono = Monomial {
-            seq: Admissible(seq.to_vec()),
-            deg: seq.iter().sum(),
-        };
-        let mut s = std::collections::HashSet::new();
-        s.insert(mono);
-        Element(s)
-    }
+    let mono = Monomial {
+        seq: Admissible(Seq::from_slice(seq)),
+        deg: seq.iter().sum(),
+    };
+    Element::singleton(mono)
 }
 
 impl From<Monomial> for Element {
     fn from(m: Monomial) -> Self {
-        let mut s = std::collections::HashSet::new();
-        s.insert(m);
-        Element(s)
+        Element::singleton(m)
     }
 }
 
 /// Leading monomial sequence from an Element — highest filtration first.
-/// We use max() on Vec<usize> lex order because the largest first generator
-/// corresponds to the highest row (filtration) in the Curtis table.
+/// Element is maintained sorted ascending, so `.last()` is the max in O(1).
 fn filtration_leading(elem: &Element) -> Vec<usize> {
-    elem.0
-        .iter()
-        .map(|m| m.seq.0.clone())
-        .max()  // lex order on Vec<usize> — largest first gen = highest filtration
-        .unwrap_or_default()
+    elem.0.last().map(|m| m.seq.0.to_vec()).unwrap_or_default()
 }
 
 fn char_digit(n: u32) -> char {
