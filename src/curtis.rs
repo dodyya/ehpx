@@ -166,13 +166,19 @@ impl CurtisTable {
 
     // ── Phase 1: populate column k ──────────────────────────────────────────
 
-    fn populate_column(&mut self, k: usize) {
+    fn populate_column(&mut self, k: usize, max_stem: usize) {
         // Row 1: stem k portion of Λ(1).
         // Λ(1) is spanned by admissible monomials whose first generator is ≤ 0,
-        // i.e. just the unit in degree 0.  For k=0 the unit lives here.
+        // i.e. the unit and λ_0^p for all p ≥ 1.
         if k == 0 {
-            // The unit (empty sequence) lives in row 1, stem 0.
-            self.insert_entry(0, 1, vec![]);
+            self.insert_entry(0, 1, vec![]);           // unit
+            // Include λ_0^p tails — enough for genuine pairings plus a buffer.
+            // Each "real" differential typically targets entries with ≤1 trailing
+            // zero; the rest pair off mechanically via [k,0^p]→[k-1,0^{p+1}].
+            let tail_cap = (max_stem / 4).max(2);
+            for p in 1..=tail_cap {
+                self.insert_entry(0, 1, vec![0; p]);   // λ_0^p
+            }
         }
 
         // Rows n ≥ 3: H_{k-n+1}(Λ(2n-1)), multiply survivors by λ_{n-1}.
@@ -233,31 +239,32 @@ impl CurtisTable {
     /// - If d(x) = 0, x is a cycle candidate; return.
     /// - If the leading term y of d(x) is in the table and free, record x → y.
     /// - Otherwise, find a tail of y that's already a differential target,
-    ///   splice in the source, and recurse.
+    ///   splice in the source, and recurse with the full adjusted element.
     fn complete_cocycle(&mut self, stem: usize, row: usize, seq: Vec<usize>) {
-        // Guard against infinite recursion with a bounded iteration.
-        let mut current = seq;
+        let original = seq.clone();
+        // Track the full (multi-term) element, not just the leading monomial.
+        let mut current_elem = seq_to_element(&seq);
+
         for _guard in 0..200 {
-            let elem = seq_to_element(&current);
-            let boundary = elem.diff();
+            let boundary = current_elem.clone().diff();
 
             if boundary.0.is_empty() {
                 return; // d(x) = 0, permanent cycle candidate
             }
 
-            // Leading term = lexicographically first monomial.
-            let leading = lex_leading(&boundary);
+            // Leading term = highest-filtration monomial (largest first generator).
+            let leading = filtration_leading(&boundary);
 
             // Check: is the leading term in the table and free?
             if self.is_in_table(&leading) && !self.is_target(&leading) && !self.is_source(&leading) {
                 let tgt_row = self.row_of(&leading).unwrap();
-                self.record_differential(stem, row, current, tgt_row, leading);
+                self.record_differential(stem, row, original, tgt_row, leading);
                 return;
             }
 
             // Otherwise: "complete the cocycle."
-            // Find the longest tail of `leading` that is already the target of
-            // some differential.
+            // Find a tail of `leading` that is already the target of
+            // some differential, and adjust the element to cancel that term.
             let mut found = false;
             for ell in 1..=leading.len() {
                 let tail = &leading[ell..];
@@ -267,20 +274,18 @@ impl CurtisTable {
                 if let Some((_stem, _src_row)) = self.target_set.get(tail) {
                     // `tail` is hit by `z` under some differential.
                     let z = self.find_source_of_target(tail).unwrap();
-                    // x ← x + prefix · z
+                    // x ← x + prefix · z  (cancels the leading·tail component)
                     let prefix = &leading[..ell];
                     let prefix_elem = seq_to_element(prefix);
                     let z_elem = seq_to_element(&z);
                     let patch = prefix_elem * z_elem;
 
-                    let old_elem = seq_to_element(&current);
-                    let new_elem = old_elem + patch;
+                    current_elem = current_elem + patch;
 
-                    if new_elem.0.is_empty() {
+                    if current_elem.0.is_empty() {
                         // x became zero — it was a boundary all along
                         return;
                     }
-                    current = lex_leading_element(&new_elem);
                     found = true;
                     break;
                 }
@@ -336,7 +341,7 @@ impl CurtisTable {
 
         for k in 0..=max_stem {
             // Phase 1: populate (rows ≥ 3 and row 1)
-            table.populate_column(k);
+            table.populate_column(k, max_stem);
 
             // Phase 2: differentials
             table.compute_differentials(k);
@@ -433,6 +438,9 @@ impl CurtisTable {
         for k in 0..=max_stem {
             if let Some(diffs) = self.differentials.get(&k) {
                 for d in diffs {
+                    if is_zero_tail_artifact(&d.source) || is_zero_tail_artifact(&d.target) {
+                        continue;
+                    }
                     any = true;
                     out.push_str(&format!(
                         "  {DIM}k={}{RST}  {RED}{}{RST} {DIM}(n={})  -->  {RST}{YEL}{}{RST} {DIM}(n={}){RST}\n",
@@ -459,9 +467,11 @@ impl CurtisTable {
             row_keys.sort_unstable();
             for &row in &row_keys {
                 for seq in &col[&row] {
+                    if is_zero_tail_artifact(seq) { continue; }
                     let s = format_seq(seq);
                     if self.is_source(seq) {
                         let tgt = self.source_set.get(seq).unwrap();
+                        if is_zero_tail_artifact(tgt) { continue; }
                         let tr = self.row_of(tgt).unwrap_or(0);
                         lines.push(format!(
                             "    {RED}{s}{RST} {DIM}n={row}  -->  {RST}{YEL}{}{RST} {DIM}n={tr}{RST}",
@@ -489,6 +499,9 @@ impl CurtisTable {
         out.push_str(&format!("{BLD}{CYN} Survivors — H*(Lambda) cycle candidates{RST}\n"));
         for k in 0..=max_stem {
             let survs = self.survivors(k, usize::MAX);
+            let survs: Vec<_> = survs.into_iter()
+                .filter(|s| !is_zero_tail_artifact(s))
+                .collect();
             if survs.is_empty() { continue; }
             let mut items: Vec<String> = survs.iter().map(|s| {
                 let r = self.row_of(s).unwrap_or(0);
@@ -519,11 +532,13 @@ impl CurtisTable {
         let mut n_src = 0u32;
         let mut n_tgt = 0u32;
         for seq in entries {
+            if is_zero_tail_artifact(seq) { continue; }
             if self.is_source(seq) { n_src += 1; }
             else if self.is_target(seq) { n_tgt += 1; }
             else { n_cycle += 1; }
         }
         let total = n_cycle + n_src + n_tgt;
+        if total == 0 { return ('.', DIM); }
 
         if n_src > 0 && n_cycle == 0 && n_tgt == 0 {
             if n_src == 1 { ('x', RED) } else { (char_digit(n_src), RED) }
@@ -566,22 +581,31 @@ impl From<Monomial> for Element {
     }
 }
 
-/// Lexicographically leading monomial sequence from an Element.
-fn lex_leading(elem: &Element) -> Vec<usize> {
+/// Leading monomial sequence from an Element — highest filtration first.
+/// We use max() on Vec<usize> lex order because the largest first generator
+/// corresponds to the highest row (filtration) in the Curtis table.
+fn filtration_leading(elem: &Element) -> Vec<usize> {
     elem.0
         .iter()
         .map(|m| m.seq.0.clone())
-        .min()  // lex order on Vec<usize> — smallest = leading
+        .max()  // lex order on Vec<usize> — largest first gen = highest filtration
         .unwrap_or_default()
-}
-
-/// Return the lex-leading monomial's sequence from an Element.
-fn lex_leading_element(elem: &Element) -> Vec<usize> {
-    lex_leading(elem)
 }
 
 fn char_digit(n: u32) -> char {
     if n <= 9 { char::from_digit(n, 10).unwrap() } else { '#' }
+}
+
+/// True if `seq` is a λ_0-tail truncation artifact that should be hidden
+/// from the main display.  Keeps: the unit, single [0], entries with ≤1
+/// trailing zero, and any entry whose non-zero prefix is "interesting."
+fn is_zero_tail_artifact(seq: &[usize]) -> bool {
+    if seq.is_empty() { return false; }           // unit
+    // Pure λ_0^k (all zeros): artifact for k ≥ 2
+    if seq.iter().all(|&x| x == 0) { return seq.len() >= 2; }
+    // Count trailing zeros
+    let trailing = seq.iter().rev().take_while(|&&x| x == 0).count();
+    trailing >= 2
 }
 
 fn format_seq(seq: &[usize]) -> String {

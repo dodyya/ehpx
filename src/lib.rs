@@ -25,9 +25,6 @@ impl Admissible {
                 return None;
             }
         }
-        if seq.iter().any(|&x| x == 0) {
-            return None;
-        }
         Some(Admissible(seq.to_vec()))
     }
 }
@@ -68,18 +65,13 @@ impl Element {
     }
 }
 
-// d([i]) = sum_{j=1}^{floor(i/2)} binom(i-j, j) % 2 * [i-j, j-1]
-// where [0] = unit, so j=1 produces [i-1] alone.
-// All terms with j >= 2 are admissible: j-1 <= 2*(i-j) follows from j <= i/2.
+// d(λ_i) = Σ_{j=1}^{⌊i/2⌋} C(i-j, j) · λ_{i-j} · λ_{j-1}
+// All terms are admissible: j-1 ≤ 2(i-j) follows from j ≤ i/2.
 pub fn diff_generator(i: usize) -> Element {
     let mut result = Element::zero();
     for j in 1..=(i / 2) {
         if binom_mod2(i - j, j) {
-            let term = if j == 1 {
-                Element::new(&[i - 1]).unwrap()
-            } else {
-                Element::new(&[i - j, j - 1]).unwrap()
-            };
+            let term = Element::new(&[i - j, j - 1]).unwrap();
             result = result + term;
         }
     }
