@@ -1,56 +1,35 @@
 # ehpx
 
-Lambda algebra calculator. Part of **IML Spring 2026: Computing with the EHP sequence**.
+Lambda algebra calculator plus a Curtis-algorithm driver for the EHP spectral
+sequence. Part of *IML Spring 2026: Computing with the EHP sequence*.
 
 ## What it does
 
-Computes in the Lambda algebra over **F₂**: the free associative graded algebra on generators λ_i (written `[i]`) with the admissibility condition and Adem relations, together with the differential that makes it a DGA.
+Arithmetic in the lambda algebra Λ over **F₂** — the free associative graded
+algebra on generators λᵢ (written `[i]`) modulo the admissibility condition
+and the Adem relations — together with the differential that makes it a DGA.
 
-- **Admissible monomials** — sequences `[s₁, s₂, ..., sₙ]` with each sₖ₊₁ ≤ 2·sₖ
-- **Multiplication** — reduces to admissible form via Adem relations
-- **Differential** — `d([i]) = Σ C(i−j, j) [i−j, j−1]` (mod 2), extended by the Leibniz rule
-- **REPL** — interactive expression evaluator
-- **`gen` binary** — enumerates all admissible monomials by degree, writes to a file
+- **Admissible monomials** — sequences `[s₁, …, sₙ]` with `sₖ₊₁ ≤ 2·sₖ`
+- **Multiplication** — reduces non-admissible products via Adem
+- **Differential** — `d([i]) = Σ C(i−j, j) [i−j, j−1]` (mod 2), Leibniz-extended
+- **Curtis algorithm** — fills the Curtis table by stem/filtration, computes
+  differentials, and prints the surviving cycles in H\*(Λ)
 
-## Getting Rust
-
-If you don't have Rust installed:
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-Follow the prompts (the defaults are fine). Then open a new terminal, or run:
+## Build
 
 ```sh
-source "$HOME/.cargo/env"
+cargo build --release
 ```
 
-Verify it worked:
+(Install Rust via `rustup` from https://rustup.rs if you don't have it.)
 
-```sh
-rustc --version   # should print something like: rustc 1.85.0 (...)
-cargo --version
-```
+## Binaries
 
-> **Windows**: download and run the installer from https://rustup.rs — it handles everything.
-> **Linux**: same `curl` command above works; you may also need `build-essential` / `gcc` if prompted.
-
-## Building and running
-
-Clone the repo and enter the directory, then:
-
-```sh
-cargo build
-```
-
-### REPL
+### `ehpx` — interactive REPL
 
 ```sh
 cargo run --bin ehpx
 ```
-
-At the `>` prompt you can type expressions:
 
 ```
 > [3]
@@ -58,29 +37,44 @@ At the `>` prompt you can type expressions:
 > [2] * [2]
 λ_(3, 1)
 > d([4])
-λ_(2, 1) + λ_(3)
-> d([2] * [3])
-λ_(1, 2) + λ_(2, 1)
+λ_(2, 1) + λ_(3, 0)
 > [2] * [3] + [4, 1]
 λ_(3, 1, 1) + λ_(4, 1)
 > quit
 ```
 
-**Syntax:**
-- `[a, b, c]` — admissible monomial λ_a λ_b λ_c
-- `+` — addition (mod 2, so `x + x = 0`)
-- `*` — multiplication (applies Adem relations automatically)
-- `d(expr)` — differential
-- Parentheses for grouping
-- `quit` or `exit` to leave
+Syntax: `[a,b,c]` admissible monomial · `+` F₂ addition · `*` multiplication
+(Adem applied automatically) · `d(…)` differential · parens for grouping ·
+`quit` / `exit` to leave.
 
-### Enumerate admissible monomials
+### `table` — Curtis table
 
 ```sh
-cargo run --bin gen
+cargo run --release --bin table [max_stem]
 ```
 
-Writes `admissible_monomials.txt` to the working directory, listing every admissible monomial by degree up to degree 20. To change the cutoff, edit `N_MAX` in `src/bin/gen.rs`.
+Runs the Curtis algorithm through the given stem (default 12), prints the
+dot chart (cycles / sources / targets per bidegree), the list of
+differentials, a per-stem detail view, and the final survivor list.
 
+### `check_diff` — correctness test bench
 
-Yes, a lot of this was vibe coded. Parsers are a solved problem, and the rest is just recursively evaluating expressions; I'll write artisanal code when the problem I'm solving requires it.
+```sh
+cargo run --release --bin check_diff [max_deg]
+```
+
+Exercises the Rust differential against the reference implementation in
+`lambda.py` (found by walking up from CWD). Runs every admissible monomial
+of degree ≤ `max_deg`, every 2-element F₂ sum, and capped samples of 3-
+and 4-element sums (~2200 tests at `max_deg=8`). Requires `python3`;
+exits nonzero on any mismatch.
+
+## Layout
+
+- `src/lib.rs` — algebra: `Admissible`, `Monomial`, `Element`, mul, diff, Adem
+- `src/curtis.rs` — Curtis algorithm & table rendering
+- `src/repl.rs` — parser + interpreter for the REPL
+- `src/bin/table.rs` — `table` binary entry point
+- `src/bin/check_diff.rs` — correctness test bench
+- `scripts/check_driver.py` — wire-format shim around `lambda.py`
+- `lambda.py` — Python reference implementation of the differential
