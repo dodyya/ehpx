@@ -1,12 +1,13 @@
 //! Differential correctness checker — compares every Rust answer against
-//! a Python reference implementation.
+//! the lambda.py reference implementation.
 //!
 //! Usage:
 //!   cargo run --bin check_diff [max_deg]
 //!
 //! `max_deg` (default 8) bounds the total degree of monomials used in test
-//! cases.  The Python script is embedded in the binary so no PATH setup is
-//! needed beyond having `python3` available.
+//! cases.  The binary finds `lambda.py` by walking up the directory tree from
+//! the current working directory (so it works from the worktree or the repo
+//! root).  `python3` must be available on PATH.
 //!
 //! Test suite:
 //!   • Every admissible monomial of total degree 0 … max_deg       (singletons)
@@ -18,12 +19,14 @@
 //! Exit code 0 = all pass, 1 = at least one mismatch, 2 = setup error.
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use ehpx::{Admissible, Element, Monomial, Seq};
 
-// Python reference script embedded at compile time.
-const PYTHON_SCRIPT: &str = include_str!("../../scripts/lambda_ref.py");
+// Thin wire-format shim around lambda.py — embedded so the binary is
+// self-contained apart from needing lambda.py on disk.
+const DRIVER: &str = include_str!("../../scripts/check_driver.py");
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -55,6 +58,20 @@ fn format_elem(e: &Element) -> String {
     e.0.iter().map(format_mono).collect::<Vec<_>>().join(" ")
 }
 
+/// Walk up the directory tree from `start` looking for `lambda.py`.
+fn find_lambda_py(start: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        let candidate = dir.join("lambda.py");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
 // ── monomial enumeration ──────────────────────────────────────────────────────
 
 /// All admissible monomials with positive generators (≥ 1) of total degree
@@ -83,7 +100,6 @@ fn enum_rec(remaining: usize, max_next: usize, cur: &mut Vec<usize>, out: &mut V
 fn build_test_cases(max_deg: usize) -> Vec<Element> {
     let all_monos = enumerate_admissible(max_deg);
 
-    // Degree of a sequence (sum of entries).
     let deg = |s: &Vec<usize>| -> usize { s.iter().sum() };
 
     let combo2_deg = max_deg.min(6);
@@ -102,8 +118,6 @@ fn build_test_cases(max_deg: usize) -> Vec<Element> {
     }
 
     // ── singletons: λ₀-containing monomials ─────────────────────────────────
-    // These are not produced by enumerate_admissible (which starts at 1) but
-    // are legal in the algebra after the λ₀ fix.
     for extra in &[
         vec![0usize],
         vec![0, 0],
@@ -178,10 +192,19 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
 
-    // Write the embedded Python script to a temp file.
-    let tmp_script = std::env::temp_dir().join("ehpx_lambda_ref.py");
-    std::fs::write(&tmp_script, PYTHON_SCRIPT).unwrap_or_else(|e| {
-        eprintln!("error: could not write temp script to {}: {e}", tmp_script.display());
+    // Locate lambda.py by searching up from CWD.
+    let cwd = std::env::current_dir().expect("cannot read CWD");
+    let lambda_path = find_lambda_py(&cwd).unwrap_or_else(|| {
+        eprintln!("error: lambda.py not found in {cwd:?} or any parent directory.");
+        eprintln!("Run from within the ehpx repository tree.");
+        std::process::exit(2);
+    });
+    eprintln!("check_diff: using reference {}", lambda_path.display());
+
+    // Write the embedded driver shim to a temp file.
+    let tmp_driver = std::env::temp_dir().join("ehpx_check_driver.py");
+    std::fs::write(&tmp_driver, DRIVER).unwrap_or_else(|e| {
+        eprintln!("error: could not write driver to {}: {e}", tmp_driver.display());
         std::process::exit(2);
     });
 
@@ -201,16 +224,16 @@ fn main() {
         rust_pairs.len()
     );
 
-    // Spawn Python oracle.
+    // Spawn Python driver with lambda.py path as argument.
     let mut child = Command::new("python3")
-        .arg(&tmp_script)
+        .arg(&tmp_driver)
+        .arg(&lambda_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap_or_else(|e| {
             eprintln!("error: failed to spawn python3: {e}");
-            eprintln!("Make sure python3 is installed and accessible.");
             std::process::exit(2);
         });
 
@@ -220,9 +243,9 @@ fn main() {
         for (input, _) in &rust_pairs {
             writeln!(stdin, "{input}").unwrap();
         }
-    } // drop → EOF signal to python
+    } // drop → EOF
 
-    // Collect python outputs.
+    // Collect Python outputs.
     let reader = BufReader::new(child.stdout.take().unwrap());
     let python_answers: Vec<String> = reader
         .lines()
@@ -234,18 +257,17 @@ fn main() {
     // Compare.
     let mut passed = 0usize;
     let mut failed = 0usize;
-    let max_print = 20; // only show first 20 failures to avoid flooding the terminal
 
     for (i, (input, rust_out)) in rust_pairs.iter().enumerate() {
         let python_out = python_answers.get(i).map(String::as_str).unwrap_or("<missing>");
         if rust_out == python_out {
             passed += 1;
         } else {
-            if failed < max_print {
+            if failed < 20 {
                 eprintln!("FAIL  d({input})");
                 eprintln!("      rust  : {rust_out}");
                 eprintln!("      python: {python_out}");
-            } else if failed == max_print {
+            } else if failed == 20 {
                 eprintln!("… (further failures suppressed)");
             }
             failed += 1;
