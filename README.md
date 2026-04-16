@@ -78,3 +78,11 @@ exits nonzero on any mismatch.
 - `src/bin/check_diff.rs` — correctness test bench
 - `scripts/check_driver.py` — wire-format shim around `lambda.py`
 - `lambda.py` — Python reference implementation of the differential
+
+## References
+
+Douglas C. Ravenel, *Complex Cobordism and Stable Homotopy Groups of Spheres*, 2nd ed., AMS Chelsea Publishing, 2004. ISBN 978-0-8218-2967-7.
+
+Martin C. Tangora, *Computing the Homology of the Lambda Algebra*, Memoirs of the American Mathematical Society, vol. 58, no. 337, AMS, 1985. ISBN 978-0-8218-2338-5.
+
+Keita Allen, "Computing the Homology of the C-Motivic Lambda Algebra," University of Chicago Mathematics REU, 2022. http://math.uchicago.edu/~may/REU2022/REUPapers/Allen.pdf
