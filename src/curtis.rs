@@ -38,6 +38,7 @@ pub struct Differential {
 }
 
 /// The full Curtis table.
+#[derive(Debug)]
 pub struct CurtisTable {
     /// entries[stem][row] = list of admissible sequences
     pub entries: BTreeMap<usize, BTreeMap<usize, Vec<Vec<usize>>>>,
@@ -124,8 +125,8 @@ impl CurtisTable {
         None
     }
 
-    /// Read survivors from column `stem`, restricting to rows ≤ `max_row`.
-    /// A survivor is an entry that is neither a source nor a target of a differential.
+    /// Read survivors from column `stem`, restricting to info from rows ≤ `max_row`.
+    /// A survivor is an entry that is neither a source nor a target of a differential, as far as we're aware.
     fn survivors(&self, stem: usize, max_row: usize) -> Vec<Vec<usize>> {
         let mut result = Vec::new();
         if let Some(rows) = self.entries.get(&stem) {
@@ -134,7 +135,9 @@ impl CurtisTable {
                     continue;
                 }
                 for seq in entries {
-                    if !self.is_source(seq) && !self.is_target(seq) {
+                    if !self.is_source(seq) && self.target_set.get(seq).is_none_or(|(_stem,source_row)|{*source_row>max_row}) {// Needs to allow being a target, as long as the source of the differential is > max_row.
+
+
                         result.push(seq.clone());
                     }
                 }
@@ -143,27 +146,7 @@ impl CurtisTable {
         result
     }
 
-    // ── enumeration: all admissible monomials of degree `deg` with first
-    //    generator ≤ `max_first` ──────────────────────────────────────────────
 
-    fn enumerate_admissible(deg: usize, max_first: usize) -> Vec<Vec<usize>> {
-        let mut out = Vec::new();
-        Self::enum_rec(deg, max_first, &mut Vec::new(), &mut out);
-        out
-    }
-
-    fn enum_rec(remaining: usize, max_next: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
-        if remaining == 0 {
-            out.push(cur.clone());
-            return;
-        }
-        let cap = remaining.min(max_next);
-        for next in 1..=cap {
-            cur.push(next);
-            Self::enum_rec(remaining - next, 2 * next, cur, out);
-            cur.pop();
-        }
-    }
 
     // ── Phase 1: populate column k ──────────────────────────────────────────
 
@@ -264,14 +247,13 @@ impl CurtisTable {
             }
 
             // Otherwise: "complete the cocycle."
-            // Find a tail of `leading` that is already the target of
-            // some differential, and adjust the element to cancel that term.
+            // Find a (possibly full) tail of `leading` that is already the
+            // target of some differential, and adjust the element to cancel
+            // that term.  `ell=0` = the leading itself is a target — in that
+            // case the patch is just `z` with an empty prefix.
             let mut found = false;
-            for ell in 1..=leading.len() {
+            for ell in 0..leading.len() {
                 let tail = &leading[ell..];
-                if tail.is_empty() {
-                    break;
-                }
                 if let Some((_stem, _src_row)) = self.target_set.get(tail) {
                     // `tail` is hit by `z` under some differential.
                     let z = self.find_source_of_target(tail).unwrap();
@@ -356,85 +338,81 @@ impl CurtisTable {
         table
     }
 
+    /// Run the Curtis algorithm but pause right before calling `complete_cocycle`
+    /// on the entry matching `(stop_stem, stop_seq)` — whatever row it's in.
+    /// Returns `(table, row_it_lives_in)` with all earlier state exactly as
+    /// the normal driver would have produced it.  If `stop_seq` is never hit
+    /// (or was already paired), falls through to full computation and returns
+    /// `None` for the row.
+    pub fn compute_partial(
+        max_stem: usize,
+        stop_stem: usize,
+        stop_seq: &[usize],
+    ) -> (Self, Option<usize>) {
+        let mut table = Self::new();
+
+        for k in 0..=max_stem {
+            table.populate_column(k, max_stem);
+
+            // Mirror compute_differentials, but watch for the stop entry.
+            let rows: Vec<usize> = if let Some(col) = table.entries.get(&k) {
+                col.keys().filter(|&&r| r >= 3).copied().collect()
+            } else {
+                vec![]
+            };
+
+            for row in rows {
+                let entries: Vec<Vec<usize>> = table
+                    .entries
+                    .get(&k)
+                    .and_then(|col| col.get(&row))
+                    .cloned()
+                    .unwrap_or_default();
+
+                for seq in entries {
+                    if k == stop_stem && seq.as_slice() == stop_seq {
+                        table.max_stem = k;
+                        return (table, Some(row));
+                    }
+                    if table.is_source(&seq) || table.is_target(&seq) {
+                        continue;
+                    }
+                    table.complete_cocycle(k, row, seq);
+                }
+            }
+
+            table.fill_row_2(k);
+            table.max_stem = k;
+        }
+
+        (table, None)
+    }
+
     // ── Visualization ───────────────────────────────────────────────────────
 
-    /// Render the Curtis table to a string for terminal display.
-    pub fn display(&self, max_stem: usize) -> String {
-        // ANSI
-        const RED: &str = "\x1b[31m";
-        const GRN: &str = "\x1b[32m";
-        const YEL: &str = "\x1b[33m";
-        const CYN: &str = "\x1b[36m";
-        const DIM: &str = "\x1b[2m";
-        const BLD: &str = "\x1b[1m";
-        const RST: &str = "\x1b[0m";
+    /// Render the Curtis table to a string.
+    pub fn display(&self, max_stem: usize, style: RenderStyle) -> String {
+        let c = Codes::from(style);
+        let lam = c.lam;
+        let fmt_seq = |seq: &[usize]| format_seq_with(seq, lam);
+        let section = |title: &str| -> String {
+            match style {
+                RenderStyle::Ansi => format!("{}{} {}{}\n", c.bld, c.cyn, title, c.rst),
+                _ => {
+                    let bar = "═".repeat(title.chars().count() + 2);
+                    let bar = match style {
+                        RenderStyle::Ascii => "=".repeat(title.chars().count() + 2),
+                        _ => bar,
+                    };
+                    format!("{bar}\n {title}\n{bar}\n")
+                }
+            }
+        };
 
         let mut out = String::new();
-        let mut max_row = 0usize;
-        for col in self.entries.values() {
-            for &r in col.keys() {
-                max_row = max_row.max(r);
-            }
-        }
-        if max_row == 0 { max_row = 1; }
 
-        // ── 1. Dot chart  (n vs k, one char per generator) ──────────────────
-        //
-        //  Each cell gets a count of generators:
-        //    .  = empty
-        //    o  = 1 cycle (green)
-        //    2  = 2 cycles, etc.
-        //    x  = 1 source (red), X = mixed source+cycle
-        //    *  = 1 target (yellow)
-        //  This keeps columns to a fixed 4-char width so alignment is trivial.
-
-        out.push_str(&format!(
-            "\n{BLD}{CYN} Curtis table — EHP spectral sequence — stems 0..{}{RST}\n",
-            max_stem,
-        ));
-        out.push_str(&format!(
-            " {DIM}{GRN}o{RST}{DIM}=cycle  {RED}x{RST}{DIM}=source  {YEL}*{RST}{DIM}=target  number=count{RST}\n\n",
-        ));
-
-        let cw = 4usize; // fixed column width
-
-        // Header row
-        out.push_str(&format!("{:>4} |", "n\\k"));
-        for k in 0..=max_stem {
-            out.push_str(&format!("{:^cw$}", k));
-        }
-        out.push('\n');
-
-        // Separator
-        out.push_str("-----+");
-        for _ in 0..=max_stem {
-            out.push_str("----");
-        }
-        out.push('\n');
-
-        // Body rows, high n first
-        for row in (1..=max_row).rev() {
-            out.push_str(&format!("{:>4} |", row));
-            for k in 0..=max_stem {
-                let glyph = self.cell_glyph(k, row);
-                // glyph is (visible_char, ansi_colour)
-                let pad_l = (cw - 1) / 2;
-                let pad_r = cw - 1 - pad_l;
-                out.push_str(&format!(
-                    "{}{}{}{}{RST}{}",
-                    " ".repeat(pad_l),
-                    glyph.1, // colour
-                    glyph.0, // char
-                    if glyph.1.is_empty() { "" } else { RST },
-                    " ".repeat(pad_r),
-                ));
-            }
-            out.push('\n');
-        }
-        out.push('\n');
-
-        // ── 2. Differentials ────────────────────────────────────────────────
-        out.push_str(&format!("{BLD}{CYN} Differentials{RST}\n"));
+        // ── 1. Differentials ────────────────────────────────────────────────
+        out.push_str(&section("Differentials"));
         let mut any = false;
         for k in 0..=max_stem {
             if let Some(diffs) = self.differentials.get(&k) {
@@ -444,114 +422,232 @@ impl CurtisTable {
                     }
                     any = true;
                     out.push_str(&format!(
-                        "  {DIM}k={}{RST}  {RED}{}{RST} {DIM}(n={})  -->  {RST}{YEL}{}{RST} {DIM}(n={}){RST}\n",
-                        d.stem,
-                        format_seq(&d.source), d.source_row,
-                        format_seq(&d.target), d.target_row,
+                        "  {dim}k={k}{rst}  {red}{src}{rst} {dim}(n={sr})  {arrow}  {rst}{yel}{tgt}{rst} {dim}(n={tr}){rst}\n",
+                        dim = c.dim, rst = c.rst, red = c.red, yel = c.yel, arrow = c.arrow,
+                        k = d.stem, src = fmt_seq(&d.source), sr = d.source_row,
+                        tgt = fmt_seq(&d.target), tr = d.target_row,
                     ));
                 }
             }
         }
-        if !any { out.push_str(&format!("  {DIM}(none){RST}\n")); }
+        if !any { out.push_str(&format!("  {}(none){}\n", c.dim, c.rst)); }
         out.push('\n');
 
-        // ── 3. Per-stem detail ──────────────────────────────────────────────
-        out.push_str(&format!("{BLD}{CYN} Detail by stem{RST}\n"));
+        // ── 2. Per-stem detail ──────────────────────────────────────────────
+        out.push_str(&section("Detail by stem"));
         for k in 0..=max_stem {
             let col = match self.entries.get(&k) {
                 Some(c) => c,
                 None => continue,
             };
-            // Collect all entries with status
-            let mut lines: Vec<String> = Vec::new();
+            // Gather per-line rendering, with raw monomial text for width alignment.
+            let mut raw: Vec<(String, String)> = Vec::new(); // (lhs_raw, suffix_colored)
             let mut row_keys: Vec<usize> = col.keys().copied().collect();
             row_keys.sort_unstable();
             for &row in &row_keys {
                 for seq in &col[&row] {
                     if is_zero_tail_artifact(seq) { continue; }
-                    let s = format_seq(seq);
+                    let s = fmt_seq(seq);
                     if self.is_source(seq) {
                         let tgt = self.source_set.get(seq).unwrap();
                         if is_zero_tail_artifact(tgt) { continue; }
                         let tr = self.row_of(tgt).unwrap_or(0);
-                        lines.push(format!(
-                            "    {RED}{s}{RST} {DIM}n={row}  -->  {RST}{YEL}{}{RST} {DIM}n={tr}{RST}",
-                            format_seq(tgt),
-                        ));
+                        let lhs_raw = s.clone();
+                        let lhs = format!("{}{}{}", c.red, s, c.rst);
+                        let suffix = format!(
+                            " {}n={}  {}  {}{}{} {}n={}{}",
+                            c.dim, row, c.arrow, c.yel, fmt_seq(tgt), c.rst,
+                            c.dim, tr, c.rst,
+                        );
+                        raw.push((lhs_raw, format!("{}{}", lhs, suffix)));
                     } else if self.is_target(seq) {
                         // printed with its source
                     } else {
-                        lines.push(format!(
-                            "    {GRN}{s}{RST} {DIM}n={row}{RST}",
-                        ));
+                        let lhs_raw = s.clone();
+                        let lhs = format!("{}{}{}", c.grn, s, c.rst);
+                        let suffix = format!(" {}n={}{}", c.dim, row, c.rst);
+                        raw.push((lhs_raw, format!("{}{}", lhs, suffix)));
                     }
                 }
             }
-            if lines.is_empty() { continue; }
-            out.push_str(&format!("  {BLD}k={k}{RST}\n"));
-            for l in &lines {
-                out.push_str(l);
+            if raw.is_empty() { continue; }
+            out.push_str(&format!("  {}k={}{}\n", c.bld, k, c.rst));
+            // Column-align the left monomial for nicer reading.
+            let w = raw.iter().map(|(r, _)| r.chars().count()).max().unwrap_or(0);
+            for (lhs_raw, line) in &raw {
+                let pad = w.saturating_sub(lhs_raw.chars().count());
+                // We can't just pad `line` (it has ANSI codes); reconstruct with pad.
+                // Easier: split around the raw monomial position isn't clean, so
+                // insert padding after the colored-lhs in `line`.  Since `line`
+                // begins with color+seq+reset, append spaces right after the
+                // first reset sequence.  For Plain/Ascii where c.rst is empty,
+                // we splice after the seq text.
+                let padded_line = if c.rst.is_empty() {
+                    // find end of lhs_raw in line
+                    match line.find(lhs_raw) {
+                        Some(pos) => {
+                            let end = pos + lhs_raw.len();
+                            let mut s = String::new();
+                            s.push_str(&line[..end]);
+                            s.push_str(&" ".repeat(pad));
+                            s.push_str(&line[end..]);
+                            s
+                        }
+                        None => line.clone(),
+                    }
+                } else {
+                    match line.find(c.rst) {
+                        Some(pos) => {
+                            let end = pos + c.rst.len();
+                            let mut s = String::new();
+                            s.push_str(&line[..end]);
+                            s.push_str(&" ".repeat(pad));
+                            s.push_str(&line[end..]);
+                            s
+                        }
+                        None => line.clone(),
+                    }
+                };
+                out.push_str("    ");
+                out.push_str(&padded_line);
                 out.push('\n');
             }
         }
         out.push('\n');
 
-        // ── 4. Survivors ────────────────────────────────────────────────────
-        out.push_str(&format!("{BLD}{CYN} Survivors — H*(Lambda) cycle candidates{RST}\n"));
+        // ── 3. Survivors ────────────────────────────────────────────────────
+        out.push_str(&section("Survivors — H*(Lambda) cycle candidates"));
         for k in 0..=max_stem {
             let survs = self.survivors(k, usize::MAX);
             let survs: Vec<_> = survs.into_iter()
                 .filter(|s| !is_zero_tail_artifact(s))
                 .collect();
             if survs.is_empty() { continue; }
-            let mut items: Vec<String> = survs.iter().map(|s| {
-                let r = self.row_of(s).unwrap_or(0);
-                format!("{GRN}{}{RST}{DIM}(n={r}){RST}", format_seq(s))
-            }).collect();
-            items.sort();
-            out.push_str(&format!("  {BLD}k={k:<3}{RST} {}\n", items.join("  ")));
+            // Present each survivor on its own line so wide stems don't overflow.
+            out.push_str(&format!("  {}k={}{}\n", c.bld, k, c.rst));
+            // Sort for deterministic output.
+            let mut sorted: Vec<(String, usize)> = survs.iter()
+                .map(|s| (fmt_seq(s), self.row_of(s).unwrap_or(0)))
+                .collect();
+            sorted.sort();
+            let w = sorted.iter().map(|(s, _)| s.chars().count()).max().unwrap_or(0);
+            for (s, r) in &sorted {
+                let pad = w.saturating_sub(s.chars().count());
+                out.push_str(&format!(
+                    "    {}{}{}{}{} {}n={}{}\n",
+                    c.grn, s, c.rst, " ".repeat(pad), "", c.dim, r, c.rst
+                ));
+            }
         }
         out.push('\n');
 
         out
     }
 
-    /// Produce a (char, ansi_colour) pair for one cell in the dot chart.
-    fn cell_glyph(&self, stem: usize, row: usize) -> (char, &'static str) {
-        const RED: &str = "\x1b[31m";
-        const GRN: &str = "\x1b[32m";
-        const YEL: &str = "\x1b[33m";
-        const DIM: &str = "\x1b[2m";
+    /// Emit a machine-readable JSON report of the full table state.  Schema:
+    ///
+    /// ```json
+    /// {
+    ///   "max_stem": 12,
+    ///   "entries": [
+    ///     {"stem": 11, "row": 10, "seq": [9,1,1], "role": "source"},
+    ///     {"stem": 11, "row": 3,  "seq": [2,2,3,3], "role": "target"},
+    ///     {"stem": 7,  "row": 8,  "seq": [7], "role": "cycle"}
+    ///   ],
+    ///   "differentials": [
+    ///     {"stem": 11, "src_row": 10, "src": [9,1,1],
+    ///                  "tgt_row": 3,  "tgt": [2,2,3,3]}
+    ///   ],
+    ///   "survivors": [
+    ///     {"stem": 7, "row": 8, "seq": [7]}
+    ///   ]
+    /// }
+    /// ```
+    pub fn emit_json(&self, max_stem: usize) -> String {
+        let mut out = String::new();
+        out.push_str("{\n");
+        out.push_str(&format!("  \"max_stem\": {},\n", max_stem));
 
-        let entries = match self.entries.get(&stem).and_then(|c| c.get(&row)) {
-            Some(v) => v,
-            None => return ('.', DIM),
-        };
-        if entries.is_empty() { return ('.', DIM); }
-
-        let mut n_cycle = 0u32;
-        let mut n_src = 0u32;
-        let mut n_tgt = 0u32;
-        for seq in entries {
-            if is_zero_tail_artifact(seq) { continue; }
-            if self.is_source(seq) { n_src += 1; }
-            else if self.is_target(seq) { n_tgt += 1; }
-            else { n_cycle += 1; }
+        // entries
+        out.push_str("  \"entries\": [\n");
+        let mut first = true;
+        for k in 0..=max_stem {
+            let col = match self.entries.get(&k) {
+                Some(c) => c,
+                None => continue,
+            };
+            let mut row_keys: Vec<usize> = col.keys().copied().collect();
+            row_keys.sort_unstable();
+            for &row in &row_keys {
+                for seq in &col[&row] {
+                    if is_zero_tail_artifact(seq) { continue; }
+                    let role = if self.is_source(seq) {
+                        "source"
+                    } else if self.is_target(seq) {
+                        "target"
+                    } else {
+                        "cycle"
+                    };
+                    // Skip sources that point at artifact targets.
+                    if role == "source" {
+                        if let Some(t) = self.source_set.get(seq) {
+                            if is_zero_tail_artifact(t) { continue; }
+                        }
+                    }
+                    if !first { out.push_str(",\n"); }
+                    first = false;
+                    out.push_str(&format!(
+                        "    {{\"stem\": {}, \"row\": {}, \"seq\": {}, \"role\": \"{}\"}}",
+                        k, row, json_seq(seq), role
+                    ));
+                }
+            }
         }
-        let total = n_cycle + n_src + n_tgt;
-        if total == 0 { return ('.', DIM); }
+        out.push_str("\n  ],\n");
 
-        if n_src > 0 && n_cycle == 0 && n_tgt == 0 {
-            if n_src == 1 { ('x', RED) } else { (char_digit(n_src), RED) }
-        } else if n_tgt > 0 && n_cycle == 0 && n_src == 0 {
-            if n_tgt == 1 { ('*', YEL) } else { (char_digit(n_tgt), YEL) }
-        } else if n_cycle > 0 && n_src == 0 && n_tgt == 0 {
-            if n_cycle == 1 { ('o', GRN) } else { (char_digit(n_cycle), GRN) }
-        } else {
-            // mixed
-            (char_digit(total), GRN)
+        // differentials
+        out.push_str("  \"differentials\": [\n");
+        let mut first = true;
+        for k in 0..=max_stem {
+            if let Some(diffs) = self.differentials.get(&k) {
+                for d in diffs {
+                    if is_zero_tail_artifact(&d.source) || is_zero_tail_artifact(&d.target) {
+                        continue;
+                    }
+                    if !first { out.push_str(",\n"); }
+                    first = false;
+                    out.push_str(&format!(
+                        "    {{\"stem\": {}, \"src_row\": {}, \"src\": {}, \"tgt_row\": {}, \"tgt\": {}}}",
+                        d.stem, d.source_row, json_seq(&d.source),
+                        d.target_row, json_seq(&d.target)
+                    ));
+                }
+            }
         }
+        out.push_str("\n  ],\n");
+
+        // survivors
+        out.push_str("  \"survivors\": [\n");
+        let mut first = true;
+        for k in 0..=max_stem {
+            let survs = self.survivors(k, usize::MAX);
+            for seq in survs {
+                if is_zero_tail_artifact(&seq) { continue; }
+                let row = self.row_of(&seq).unwrap_or(0);
+                if !first { out.push_str(",\n"); }
+                first = false;
+                out.push_str(&format!(
+                    "    {{\"stem\": {}, \"row\": {}, \"seq\": {}}}",
+                    k, row, json_seq(&seq)
+                ));
+            }
+        }
+        out.push_str("\n  ]\n");
+
+        out.push_str("}\n");
+        out
     }
+
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -576,9 +672,6 @@ fn filtration_leading(elem: &Element) -> Vec<usize> {
     elem.0.last().map(|m| m.seq.0.to_vec()).unwrap_or_default()
 }
 
-fn char_digit(n: u32) -> char {
-    if n <= 9 { char::from_digit(n, 10).unwrap() } else { '#' }
-}
 
 /// True if `seq` is a λ_0-tail truncation artifact that should be hidden
 /// from the main display.  Keeps: the unit, single [0], entries with ≤1
@@ -593,19 +686,647 @@ fn is_zero_tail_artifact(seq: &[usize]) -> bool {
 }
 
 fn format_seq(seq: &[usize]) -> String {
+    format_seq_with(seq, "λ")
+}
+
+fn format_seq_with(seq: &[usize], lam: &str) -> String {
     if seq.is_empty() {
         "1".to_string()
     } else {
         let inner: Vec<String> = seq.iter().map(|x| x.to_string()).collect();
-        format!("λ({})", inner.join(","))
+        format!("{}({})", lam, inner.join(","))
+    }
+}
+
+fn json_seq(seq: &[usize]) -> String {
+    let inner: Vec<String> = seq.iter().map(|x| x.to_string()).collect();
+    format!("[{}]", inner.join(","))
+}
+
+// ── Render styles ──────────────────────────────────────────────────────────
+
+/// Rendering style for `display`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderStyle {
+    /// Full ANSI colors + Unicode (good for terminals).
+    Ansi,
+    /// No colors, Unicode (λ, →).  Good for .txt files viewed in modern editors.
+    Plain,
+    /// No colors, strict ASCII ("l" for lambda, "->").  Good for anywhere.
+    Ascii,
+}
+
+/// Resolved render codes — empty strings for everything in plain/ascii mode.
+struct Codes {
+    red: &'static str,
+    grn: &'static str,
+    yel: &'static str,
+    cyn: &'static str,
+    dim: &'static str,
+    bld: &'static str,
+    rst: &'static str,
+    lam: &'static str,
+    arrow: &'static str,
+}
+
+impl From<RenderStyle> for Codes {
+    fn from(s: RenderStyle) -> Self {
+        match s {
+            RenderStyle::Ansi => Codes {
+                red: "\x1b[31m", grn: "\x1b[32m", yel: "\x1b[33m", cyn: "\x1b[36m",
+                dim: "\x1b[2m",  bld: "\x1b[1m",  rst: "\x1b[0m",
+                lam: "λ", arrow: "-->",
+            },
+            RenderStyle::Plain => Codes {
+                red: "", grn: "", yel: "", cyn: "", dim: "", bld: "", rst: "",
+                lam: "λ", arrow: "→",
+            },
+            RenderStyle::Ascii => Codes {
+                red: "", grn: "", yel: "", cyn: "", dim: "", bld: "", rst: "",
+                lam: "l", arrow: "->",
+            },
+        }
     }
 }
 
 // ── Binary entry point ──────────────────────────────────────────────────────
 
-/// Run as `cargo run --bin curtis [max_stem]`
+/// Legacy entry point: compute and print with ANSI colors to stdout.
+/// The `table` binary handles flag parsing / file output / styles directly.
 pub fn run_curtis(max_stem: usize) {
     eprintln!("Computing Curtis table through stem {}...", max_stem);
     let table = CurtisTable::compute(max_stem);
-    println!("{}", table.display(max_stem));
+    println!("{}", table.display(max_stem, RenderStyle::Ansi));
+}
+
+// ── Interactive debug harness ───────────────────────────────────────────────
+//
+// A stepper for `complete_cocycle`.  Builds the table up to a chosen entry,
+// then drops into a REPL that lets you inspect the running element, query
+// the state of any sequence, single-step the cocycle loop, or run it all the
+// way out with a per-iteration trace.
+//
+// Kept inside curtis.rs because it reaches directly into the private
+// internals (target_set, source_set, is_in_table, row_of, …) — and because
+// it's meant to be surgical: a single reason to change, removed when the
+// investigation ends.
+
+/// Run the debug REPL for one cocycle-completion site.
+///
+/// Builds the Curtis table up to `max_stem`, stopping just before
+/// `complete_cocycle` would be called on the entry matching
+/// `(stop_stem, stop_seq)`.  The row is discovered automatically.
+pub fn run_debug(max_stem: usize, stop_stem: usize, stop_seq: Vec<usize>) {
+    eprintln!(
+        "Building Curtis table through stem {} (stopping at stem={}, seq={})...",
+        max_stem,
+        stop_stem,
+        format_seq(&stop_seq),
+    );
+    let (table, stop_row_opt) = CurtisTable::compute_partial(max_stem, stop_stem, &stop_seq);
+
+    let stop_row = match stop_row_opt {
+        Some(r) => {
+            eprintln!("found {} at (stem={}, row={})", format_seq(&stop_seq), stop_stem, r);
+            r
+        }
+        None => {
+            eprintln!(
+                "WARNING: {} was never reached at stem={} — either it's not an entry there, \
+                 or it got pre-paired before its turn came up.  The debug session will still \
+                 run against the fully-computed final table.",
+                format_seq(&stop_seq),
+                stop_stem,
+            );
+            0
+        }
+    };
+
+    let mut session = DebugSession {
+        current_elem: seq_to_element(&stop_seq),
+        original_seq: stop_seq,
+        stop_stem,
+        stop_row,
+        iter_count: 0,
+        table,
+    };
+
+    session.banner();
+    session.repl();
+}
+
+struct DebugSession {
+    table: CurtisTable,
+    stop_stem: usize,
+    stop_row: usize,
+    original_seq: Vec<usize>,
+    current_elem: Element,
+    iter_count: usize,
+}
+
+impl DebugSession {
+    fn banner(&self) {
+        println!();
+        println!("=== Curtis debug harness ===");
+        println!(
+            "Stopped just before complete_cocycle(stem={}, row={}, seq={})",
+            self.stop_stem,
+            self.stop_row,
+            format_seq(&self.original_seq),
+        );
+        println!();
+        println!("Commands:");
+        println!("  show                 current running element x");
+        println!("  d | diff             show d(x)");
+        println!("  lead                 filtration_leading(d(x)) + its in-table / source / target status");
+        println!("  tails                enumerate tails of the leading term with target-match status");
+        println!("  step                 execute one iteration of the cocycle loop (verbose)");
+        println!("  auto [N]             run to completion, full trace (default cap N=200)");
+        println!("  check <seq>          inspect any sequence, e.g. `check 2,2,3,3`");
+        println!("  where <seq>          which row does seq live in?");
+        println!("  diffs                all recorded differentials so far");
+        println!("  row <k> <n>          list entries in column k, row n");
+        println!("  reset                reset x back to the original seq");
+        println!("  quit | exit          leave");
+        println!();
+    }
+
+    fn repl(&mut self) {
+        use std::io::{self, BufRead, Write};
+        let stdin = io::stdin();
+        let mut stdout = io::stdout();
+        loop {
+            print!("debug> ");
+            stdout.flush().ok();
+            let mut line = String::new();
+            if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let (cmd, rest) = match line.split_once(char::is_whitespace) {
+                Some((c, r)) => (c, r.trim()),
+                None => (line.as_str(), ""),
+            };
+            match cmd {
+                "quit" | "exit" => break,
+                "show" => self.cmd_show(),
+                "d" | "diff" => self.cmd_d(),
+                "lead" => self.cmd_lead(),
+                "tails" => self.cmd_tails(),
+                "step" => self.cmd_step(),
+                "auto" => {
+                    let n = rest.parse::<usize>().unwrap_or(200);
+                    self.cmd_auto(n);
+                }
+                "check" => self.cmd_check(rest),
+                "where" => self.cmd_where(rest),
+                "diffs" => self.cmd_diffs(),
+                "row" => self.cmd_row(rest),
+                "reset" => self.cmd_reset(),
+                "help" | "?" => self.banner(),
+                _ => println!("unknown command: {:?}  (try `help`)", cmd),
+            }
+        }
+    }
+
+    // ── parsing ──────────────────────────────────────────────────────────────
+
+    fn parse_seq(s: &str) -> Option<Vec<usize>> {
+        let t = s.trim();
+        if t.is_empty() {
+            return Some(vec![]);
+        }
+        t.split(|c: char| c == ',' || c.is_whitespace() || c == '[' || c == ']')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .map(|x| x.parse::<usize>().ok())
+            .collect()
+    }
+
+    // ── commands ─────────────────────────────────────────────────────────────
+
+    fn cmd_show(&self) {
+        println!("x (iter {}):", self.iter_count);
+        if self.current_elem.0.is_empty() {
+            println!("  0");
+        } else {
+            for m in &self.current_elem.0 {
+                println!("  {}", format_seq(&m.seq.0));
+            }
+        }
+    }
+
+    fn cmd_d(&self) {
+        let boundary = self.current_elem.clone().diff();
+        println!("d(x):");
+        if boundary.0.is_empty() {
+            println!("  0");
+        } else {
+            for m in &boundary.0 {
+                println!("  {}", format_seq(&m.seq.0));
+            }
+        }
+    }
+
+    fn cmd_lead(&self) {
+        let boundary = self.current_elem.clone().diff();
+        if boundary.0.is_empty() {
+            println!("d(x) = 0; no leading term.  x is a cycle candidate.");
+            return;
+        }
+        let leading = filtration_leading(&boundary);
+        let s = format_seq(&leading);
+        let in_table = self.table.is_in_table(&leading);
+        let is_source = self.table.is_source(&leading);
+        let is_target = self.table.is_target(&leading);
+        let row = self.table.row_of(&leading);
+        println!("leading = {}", s);
+        println!("  in_table:  {}", in_table);
+        if let Some(r) = row {
+            println!("  row:       {}", r);
+        }
+        println!("  is_source: {}", is_source);
+        println!("  is_target: {}", is_target);
+        if is_source {
+            let tgt = self.table.source_set.get(&leading).unwrap();
+            println!("  → differential lands on: {}", format_seq(tgt));
+        }
+        if is_target {
+            let (st, sr) = self.table.target_set.get(&leading).unwrap();
+            if let Some(src) = self.table.find_source_of_target(&leading) {
+                println!(
+                    "  ← hit by: {} (stem={}, row={})",
+                    format_seq(&src),
+                    st,
+                    sr
+                );
+            }
+        }
+        if in_table && !is_source && !is_target {
+            println!("  ⇒ RECORD: {} → {}", format_seq(&self.original_seq), s);
+        } else {
+            println!("  ⇒ need cocycle completion (see `tails`)");
+        }
+    }
+
+    fn cmd_tails(&self) {
+        let boundary = self.current_elem.clone().diff();
+        if boundary.0.is_empty() {
+            println!("d(x) = 0; no leading term.");
+            return;
+        }
+        let leading = filtration_leading(&boundary);
+        println!("leading = {}", format_seq(&leading));
+        if leading.is_empty() {
+            println!("  (leading is empty)");
+            return;
+        }
+        let mut first_match: Option<usize> = None;
+        for ell in 0..leading.len() {
+            let prefix = &leading[..ell];
+            let tail = &leading[ell..];
+            let is_tgt = self.table.target_set.contains_key(tail);
+            let marker = if is_tgt { "✓" } else { " " };
+            let note = if is_tgt {
+                let (st, sr) = self.table.target_set.get(tail).unwrap();
+                let src = self
+                    .table
+                    .find_source_of_target(tail)
+                    .map(|s| format_seq(&s))
+                    .unwrap_or_else(|| "?".into());
+                format!("   ← source {} (stem={}, row={})", src, st, sr)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {} ell={} prefix={:<14} tail={:<14}{}",
+                marker,
+                ell,
+                format_seq(prefix),
+                format_seq(tail),
+                note
+            );
+            if is_tgt && first_match.is_none() {
+                first_match = Some(ell);
+            }
+        }
+        match first_match {
+            Some(ell) => {
+                let prefix = &leading[..ell];
+                let tail = &leading[ell..];
+                let z = self.table.find_source_of_target(tail).unwrap();
+                let prefix_elem = seq_to_element(prefix);
+                let z_elem = seq_to_element(&z);
+                let patch = prefix_elem * z_elem;
+                println!();
+                println!("→ algorithm picks ell={} (first match, ascending)", ell);
+                println!("  prefix = {}", format_seq(prefix));
+                println!("  z      = {}  (source whose target is tail {})", format_seq(&z), format_seq(tail));
+                println!("  patch  = prefix · z =");
+                if patch.0.is_empty() {
+                    println!("    0");
+                } else {
+                    for m in &patch.0 {
+                        println!("    {}", format_seq(&m.seq.0));
+                    }
+                }
+            }
+            None => {
+                println!();
+                println!("(no tail is a differential target — cocycle loop would exit without recording)");
+            }
+        }
+    }
+
+    fn cmd_step(&mut self) {
+        let boundary = self.current_elem.clone().diff();
+        if boundary.0.is_empty() {
+            println!("d(x) = 0; x is a cycle candidate.  No step.");
+            return;
+        }
+        let leading = filtration_leading(&boundary);
+        println!("── iteration {} ─────────────────────────", self.iter_count);
+        println!(
+            "d(x) has {} term(s); leading = {}",
+            boundary.0.len(),
+            format_seq(&leading)
+        );
+
+        let in_table = self.table.is_in_table(&leading);
+        let is_source = self.table.is_source(&leading);
+        let is_target = self.table.is_target(&leading);
+
+        if in_table && !is_source && !is_target {
+            let tgt_row = self.table.row_of(&leading).unwrap();
+            println!(
+                "leading free — RECORD: {} (row {}) → {} (row {})",
+                format_seq(&self.original_seq),
+                self.stop_row,
+                format_seq(&leading),
+                tgt_row
+            );
+            self.table.record_differential(
+                self.stop_stem,
+                self.stop_row,
+                self.original_seq.clone(),
+                tgt_row,
+                leading,
+            );
+            return;
+        }
+
+        println!(
+            "leading NOT free: in_table={} is_source={} is_target={}",
+            in_table, is_source, is_target
+        );
+        for ell in 0..leading.len() {
+            let tail = &leading[ell..];
+            if self.table.target_set.contains_key(tail) {
+                let prefix = &leading[..ell];
+                let z = self.table.find_source_of_target(tail).unwrap();
+                let prefix_elem = seq_to_element(prefix);
+                let z_elem = seq_to_element(&z);
+                let patch = prefix_elem * z_elem;
+                println!(
+                    "match at ell={}: tail={} z={}",
+                    ell,
+                    format_seq(tail),
+                    format_seq(&z)
+                );
+                println!("patching x ← x + ({}) · ({})", format_seq(prefix), format_seq(&z));
+                self.current_elem = self.current_elem.clone() + patch;
+                self.iter_count += 1;
+                if self.current_elem.0.is_empty() {
+                    println!("x became zero — boundary.  No differential recorded.");
+                } else {
+                    let new_d = self.current_elem.clone().diff();
+                    let new_lead = if new_d.0.is_empty() {
+                        "0".into()
+                    } else {
+                        format_seq(&filtration_leading(&new_d))
+                    };
+                    println!("new d(x) has {} term(s); new leading = {}", new_d.0.len(), new_lead);
+                }
+                return;
+            }
+        }
+        println!("no tail-match — cocycle loop terminates, no differential recorded.");
+    }
+
+    fn cmd_auto(&mut self, max_iters: usize) {
+        let mut steps = 0;
+        while steps < max_iters {
+            let boundary = self.current_elem.clone().diff();
+            if boundary.0.is_empty() {
+                println!("[iter {}] d(x) = 0; x is a cycle candidate.", self.iter_count);
+                return;
+            }
+            let leading = filtration_leading(&boundary);
+            let in_table = self.table.is_in_table(&leading);
+            let is_source = self.table.is_source(&leading);
+            let is_target = self.table.is_target(&leading);
+
+            if in_table && !is_source && !is_target {
+                let tgt_row = self.table.row_of(&leading).unwrap();
+                println!(
+                    "[iter {}] RECORD lead={} free → row {}",
+                    self.iter_count,
+                    format_seq(&leading),
+                    tgt_row
+                );
+                self.table.record_differential(
+                    self.stop_stem,
+                    self.stop_row,
+                    self.original_seq.clone(),
+                    tgt_row,
+                    leading,
+                );
+                return;
+            }
+
+            let mut matched = None;
+            for ell in 0..leading.len() {
+                let tail = &leading[ell..];
+                if self.table.target_set.contains_key(tail) {
+                    matched = Some(ell);
+                    break;
+                }
+            }
+            match matched {
+                Some(ell) => {
+                    let prefix = &leading[..ell];
+                    let tail = &leading[ell..];
+                    let z = self.table.find_source_of_target(tail).unwrap();
+                    let prefix_elem = seq_to_element(prefix);
+                    let z_elem = seq_to_element(&z);
+                    let patch = prefix_elem * z_elem;
+                    let lead_s = format_seq(&leading);
+                    let tail_s = format_seq(tail);
+                    let z_s = format_seq(&z);
+                    let prefix_s = format_seq(prefix);
+                    self.current_elem = self.current_elem.clone() + patch;
+                    self.iter_count += 1;
+                    steps += 1;
+                    let new_lead = if self.current_elem.0.is_empty() {
+                        "0".into()
+                    } else {
+                        format_seq(&filtration_leading(&self.current_elem.clone().diff()))
+                    };
+                    println!(
+                        "[iter {}] lead={} not free (in_tbl={} src={} tgt={}); ell={} tail={} z={} patch={}·z  →  new_lead={}",
+                        self.iter_count,
+                        lead_s,
+                        in_table,
+                        is_source,
+                        is_target,
+                        ell,
+                        tail_s,
+                        z_s,
+                        prefix_s,
+                        new_lead
+                    );
+                    if self.current_elem.0.is_empty() {
+                        println!("  x became zero — boundary.");
+                        return;
+                    }
+                }
+                None => {
+                    println!(
+                        "[iter {}] lead={} not free and no tail-match — halt, no differential.",
+                        self.iter_count,
+                        format_seq(&leading)
+                    );
+                    return;
+                }
+            }
+        }
+        println!("hit iteration cap {} without convergence", max_iters);
+    }
+
+    fn cmd_check(&self, s: &str) {
+        let seq = match Self::parse_seq(s) {
+            Some(v) => v,
+            None => {
+                println!("couldn't parse seq from {:?}", s);
+                return;
+            }
+        };
+        println!("seq = {}  (deg {})", format_seq(&seq), seq.iter().sum::<usize>());
+        println!("  in_table:  {}", self.table.is_in_table(&seq));
+        if let Some(r) = self.table.row_of(&seq) {
+            println!("  row:       {}", r);
+        }
+        println!("  is_source: {}", self.table.is_source(&seq));
+        println!("  is_target: {}", self.table.is_target(&seq));
+        if let Some(tgt) = self.table.source_set.get(&seq) {
+            println!("  → differential to: {}", format_seq(tgt));
+        }
+        if let Some((st, sr)) = self.table.target_set.get(&seq) {
+            if let Some(src) = self.table.find_source_of_target(&seq) {
+                println!(
+                    "  ← hit by: {} (stem={}, row={})",
+                    format_seq(&src),
+                    st,
+                    sr
+                );
+            }
+        }
+        // Also show d(seq) as a convenience.
+        let d = seq_to_element(&seq).diff();
+        if d.0.is_empty() {
+            println!("  d(seq):    0");
+        } else {
+            println!("  d(seq):");
+            for m in &d.0 {
+                println!("    {}", format_seq(&m.seq.0));
+            }
+        }
+    }
+
+    fn cmd_where(&self, s: &str) {
+        let seq = match Self::parse_seq(s) {
+            Some(v) => v,
+            None => {
+                println!("couldn't parse seq from {:?}", s);
+                return;
+            }
+        };
+        let deg: usize = seq.iter().sum();
+        match self.table.row_of(&seq) {
+            Some(r) => println!("{} is at stem={}, row={}", format_seq(&seq), deg, r),
+            None => println!("{} is NOT in the table (would be in stem={})", format_seq(&seq), deg),
+        }
+    }
+
+    fn cmd_diffs(&self) {
+        let mut any = false;
+        for (k, diffs) in &self.table.differentials {
+            for d in diffs {
+                if is_zero_tail_artifact(&d.source) || is_zero_tail_artifact(&d.target) {
+                    continue;
+                }
+                any = true;
+                println!(
+                    "  k={}  {} (row {}) → {} (row {})",
+                    k,
+                    format_seq(&d.source),
+                    d.source_row,
+                    format_seq(&d.target),
+                    d.target_row
+                );
+            }
+        }
+        if !any {
+            println!("  (none)");
+        }
+    }
+
+    fn cmd_row(&self, s: &str) {
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() != 2 {
+            println!("usage: row <k> <n>");
+            return;
+        }
+        let k: usize = match parts[0].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                println!("bad k: {:?}", parts[0]);
+                return;
+            }
+        };
+        let n: usize = match parts[1].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                println!("bad n: {:?}", parts[1]);
+                return;
+            }
+        };
+        match self.table.entries.get(&k).and_then(|col| col.get(&n)) {
+            Some(entries) => {
+                for seq in entries {
+                    let flags = {
+                        let mut f = String::new();
+                        if self.table.is_source(seq) {
+                            f.push_str(" [source]");
+                        }
+                        if self.table.is_target(seq) {
+                            f.push_str(" [target]");
+                        }
+                        f
+                    };
+                    println!("  {}{}", format_seq(seq), flags);
+                }
+            }
+            None => println!("  (empty)"),
+        }
+    }
+
+    fn cmd_reset(&mut self) {
+        self.current_elem = seq_to_element(&self.original_seq);
+        self.iter_count = 0;
+        println!("x reset to {}", format_seq(&self.original_seq));
+    }
 }

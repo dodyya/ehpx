@@ -50,12 +50,40 @@ Syntax: `[a,b,c]` admissible monomial · `+` F₂ addition · `*` multiplication
 ### `table` — Curtis table
 
 ```sh
-cargo run --release --bin table [max_stem]
+cargo run --release --bin table [MAX_STEM] [options]
 ```
 
-Runs the Curtis algorithm through the given stem (default 12), prints the
-dot chart (cycles / sources / targets per bidegree), the list of
-differentials, a per-stem detail view, and the final survivor list.
+Runs the Curtis algorithm through the given stem (default 12) and prints
+the list of differentials, a per-stem detail view, and the final survivor
+list.
+
+Output style auto-detects: ANSI color for an interactive terminal, plain
+text when piped or writing to a file.  Override with flags:
+
+- `--plain` — no ANSI; Unicode (λ, →).  Good for `.txt` files in modern editors.
+- `--ascii` — no ANSI; strict ASCII (`l(...)`, `->`).  Maximum portability.
+- `--color` — force ANSI color even when output is redirected.
+- `--json` — emit a machine-readable report (consumed by the visualizer).
+- `-o FILE` — write to `FILE` instead of stdout.
+
+Examples:
+
+```sh
+cargo run --release --bin table 12 --ascii -o report.txt
+cargo run --release --bin table 12 --json  -o report.json
+python3 scripts/visualize_table.py report.json curtis.png
+```
+
+### `visualize_table.py` — bidegree chart
+
+```sh
+python3 scripts/visualize_table.py report.json [output.png]
+```
+
+Reads the JSON emitted by `table --json` and renders the Curtis table as
+a bidegree chart: stem on the x-axis, filtration on the y-axis; entries
+are colored by role (cycle / source / target); differentials are drawn
+as red arrows from source to target.  Requires `matplotlib`.
 
 ### `check_diff` — correctness test bench
 
@@ -72,11 +100,12 @@ exits nonzero on any mismatch.
 ## Layout
 
 - `src/lib.rs` — algebra: `Admissible`, `Monomial`, `Element`, mul, diff, Adem
-- `src/curtis.rs` — Curtis algorithm & table rendering
+- `src/curtis.rs` — Curtis algorithm, table rendering, interactive debugger
 - `src/repl.rs` — parser + interpreter for the REPL
-- `src/bin/table.rs` — `table` binary entry point
+- `src/bin/table.rs` — `table` binary (flags + file output)
 - `src/bin/check_diff.rs` — correctness test bench
 - `scripts/check_driver.py` — wire-format shim around `lambda.py`
+- `scripts/visualize_table.py` — matplotlib bidegree chart from JSON
 - `lambda.py` — Python reference implementation of the differential
 
 ## References
