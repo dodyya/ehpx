@@ -2,20 +2,19 @@
 
 # ehpx
 
-Lambda algebra calculator plus a Curtis-algorithm driver for the EHP spectral
+Lambda algebra calculator plus a Curtis-algorithm implementation for the EHP spectral
 sequence. Part of *IML Spring 2026: Computing with the EHP sequence*.
 
-## What it does
+## What?
 
-Arithmetic in the lambda algebra Λ over **F₂** — the free associative graded
-algebra on generators λᵢ (written `[i]`) modulo the admissibility condition
-and the Adem relations — together with the differential that makes it a DGA.
+We implement arithmetic and differentiation for the Lambda algebra (per Bousfield-Curtis-Kan-Quillen-Rector-Schlesinger). This is a differential filtered graded algebra over 𝔽₂, whose homology gives the E² page of the Adams spectral sequence. Essentially, it's an algebraic object whose structure tells us something about homotopy groups of spheres, which is a (the!!) central open problem in algebraic topology. 
 
-- **Admissible monomials** — sequences `[s₁, …, sₙ]` with `sₖ₊₁ ≤ 2·sₖ`
-- **Multiplication** — reduces non-admissible products via Adem
-- **Differential** — `d([i]) = Σ C(i−j, j) [i−j, j−1]` (mod 2), Leibniz-extended
-- **Curtis algorithm** — fills the Curtis table by stem/filtration, computes
-  differentials, and prints the surviving cycles in H\*(Λ)
+Elements of the algebra are "admissible" finite sequences of natural numbers, ones where every element has to be no more than double the previous. Multiplication is concatenation of these sequences, except when the "seam" would make the result inadmissible, in which case the product decomposes into a sum of admissible sequences. Addition happens modulo 2, so every element can be thought of as a set of monomials. Differentiation is essentially left-multiplying by -1. 
+
+Monomials admit a grading by taking the sum of all elements in a sequence. Accordingly, differentiation decreases this value by 1. This is how the rows of the Curtis table are arranged. Additionally, we can filter all monomials by their leading term, which is how the columns work. The "point" of the Curtis table calculation is to calculate the homology of this algebra. We can avoid computing and testing all admissible sequences (entirely intractable) and instead restrict to elements that could be representatives of homology classes, by looking at the Algebraic EHP spectral sequence. It is this spectral sequence that the differentials come from; in computing the Curtis table up to some n, we are computing the part of the sseq that converges to the homology of the n-th filtration of Lambda. 
+
+## TL;DR
+This is kind of just using dynamic programming, enabled by some mathematical considerations (AEHP) to efficiently compute a property (homology) of an esoteric object (Lambda-algebra) that tells us something about another object (stable homotopy groups of spheres), that is somewhat close to an object of interest (homotopy groups of spheres) for algebraic topologists (nerds).
 
 ## Build
 
@@ -57,7 +56,7 @@ cargo run --release --bin table [MAX_STEM] [options]
 
 Runs the Curtis algorithm through the given stem (default 12) and prints
 the list of differentials, a per-stem detail view, and the final survivor
-list.
+list. 25 is about as far as I got on my machine.
 
 Output style auto-detects: ANSI color for an interactive terminal, plain
 text when piped or writing to a file.  Override with flags:
@@ -87,17 +86,7 @@ a bidegree chart: stem on the x-axis, filtration on the y-axis; entries
 are colored by role (cycle / source / target); differentials are drawn
 as red arrows from source to target.  Requires `matplotlib`.
 
-### `check_diff` — correctness test bench
-
-```sh
-cargo run --release --bin check_diff [max_deg]
-```
-
-Exercises the Rust differential against the reference implementation in
-`lambda.py` (found by walking up from CWD). Runs every admissible monomial
-of degree ≤ `max_deg`, every 2-element F₂ sum, and capped samples of 3-
-and 4-element sums (~2200 tests at `max_deg=8`). Requires `python3`;
-exits nonzero on any mismatch.
+### `check_diff` — correctness test bench; not for public use
 
 ## Layout
 
@@ -106,14 +95,17 @@ exits nonzero on any mismatch.
 - `src/repl.rs` — parser + interpreter for the REPL
 - `src/bin/table.rs` — `table` binary (flags + file output)
 - `src/bin/check_diff.rs` — correctness test bench
-- `scripts/check_driver.py` — wire-format shim around `lambda.py`
+- `scripts/check_driver.py` — wire-format shim around `lambda.py` for ground truth
 - `scripts/visualize_table.py` — matplotlib bidegree chart from JSON
 - `lambda.py` — Python reference implementation of the differential
 
 ## References
 
-Douglas C. Ravenel, *Complex Cobordism and Stable Homotopy Groups of Spheres*, 2nd ed., AMS Chelsea Publishing, 2004. ISBN 978-0-8218-2967-7.
+Allen, Keita. "Computing the Homology of the C-Motivic Lambda Algebra." University of Chicago Mathematics REU, 2022. http://math.uchicago.edu/~may/REU2022/REUPapers/Allen.pdf.
 
-Martin C. Tangora, *Computing the Homology of the Lambda Algebra*, Memoirs of the American Mathematical Society, vol. 58, no. 337, AMS, 1985. ISBN 978-0-8218-2338-5.
+Bousfield, A., E. Curtis, D. Kan, D. Quillen, D. L. Rector, and J. W. Schlesinger. "The mod-*p* lower central series and the Adams spectral sequence." *Topology* 5, no. 4 (1966): 331–342.
 
-Keita Allen, "Computing the Homology of the C-Motivic Lambda Algebra," University of Chicago Mathematics REU, 2022. http://math.uchicago.edu/~may/REU2022/REUPapers/Allen.pdf
+Ravenel, Douglas C. *Complex Cobordism and Stable Homotopy Groups of Spheres*. 2nd ed. AMS Chelsea Publishing, 2004. ISBN 978-0-8218-2967-7.
+
+Tangora, Martin C. *Computing the Homology of the Lambda Algebra*. Memoirs of the American Mathematical Society, vol. 58, no. 337. AMS, 1985. ISBN 978-0-8218-2338-5.
+
