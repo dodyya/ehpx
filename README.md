@@ -56,7 +56,10 @@ cargo run --release --bin table [MAX_STEM] [options]
 
 Runs the Curtis algorithm through the given stem (default 12) and prints
 the list of differentials, a per-stem detail view, and the final survivor
-list. 25 is about as far as I got on my machine.
+list.  After the λ₀-tail artifact optimization the algorithm is ~40× faster
+than it used to be (stem 24 went from ~45s to ~1.2s), so stem 30 is easy
+on a laptop and stem 40 is reachable given the patience of a single long
+coffee break.
 
 Output style auto-detects: ANSI color for an interactive terminal, plain
 text when piped or writing to a file.  Override with flags:
@@ -69,6 +72,11 @@ text when piped or writing to a file.  Override with flags:
   `MAX_STEM`.  The JSON is a full state snapshot, so the resumed run
   reproduces the non-artifact output of a fresh `table MAX_STEM` run
   byte-for-byte (human report and visualization both identical).
+- `--checkpoint-dir DIR` — after each stem completes, write
+  `DIR/state_kk.json` with the full state through that stem.  Safe to
+  Ctrl-C anywhere and resume with `--from DIR/state_kk.json`.  Also
+  prints a per-stem timing line to stderr, handy for seeing where the
+  computation spends its time.
 - `-o FILE` — write to `FILE` instead of stdout.
 
 Examples:
@@ -81,6 +89,10 @@ python3 scripts/visualize_table.py report.json curtis.png
 # Incrementally extend a saved state:
 cargo run --release --bin table 24 --json -o state24.json
 cargo run --release --bin table 26 --from state24.json --json -o state26.json
+
+# Granular resumability — checkpoint after every stem.  Ctrl-C any time,
+# pick back up from the latest state_kk.json.
+cargo run --release --bin table 30 --checkpoint-dir ckpt --json -o state30.json
 ```
 
 ### `visualize_table.py` — bidegree chart

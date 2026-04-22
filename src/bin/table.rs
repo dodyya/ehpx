@@ -21,6 +21,11 @@ options:
                   the saved computation up to MAX_STEM.  MAX_STEM must be
                   ≥ the saved max_stem.  Output format / destination still
                   controlled by the flags above.
+  --checkpoint-dir DIR
+                  after each stem completes, write DIR/state_kk.json with
+                  the full state through that stem.  Safe to Ctrl-C at any
+                  point and resume with `--from DIR/state_kk.json`.  DIR
+                  is created if it doesn't exist.
   -o, --output PATH
                   write output to PATH instead of stdout.  Turns off ANSI
                   unless --color is also given.
@@ -33,6 +38,9 @@ examples:
   table 12 --json -o report.json           # JSON for Python visualizer
   table 26 --from state24.json --json -o state26.json
                                            # resume 24 → 26
+  table 30 --checkpoint-dir ckpt --json -o state30.json
+                                           # write ckpt/state_00.json ..
+                                           # ckpt/state_30.json as we go
 "
 }
 
@@ -47,6 +55,7 @@ struct Args {
     style: Option<RenderStyle>, // None = auto-detect
     output: Option<PathBuf>,
     resume_from: Option<PathBuf>,
+    checkpoint_dir: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -55,6 +64,7 @@ fn parse_args() -> Result<Args, String> {
     let mut style: Option<RenderStyle> = None;
     let mut output: Option<PathBuf> = None;
     let mut resume_from: Option<PathBuf> = None;
+    let mut checkpoint_dir: Option<PathBuf> = None;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -92,6 +102,16 @@ fn parse_args() -> Result<Args, String> {
             s if s.starts_with("--from=") => {
                 resume_from = Some(PathBuf::from(&s["--from=".len()..]));
             }
+            "--checkpoint-dir" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err(format!("{} needs an argument", a));
+                }
+                checkpoint_dir = Some(PathBuf::from(&argv[i]));
+            }
+            s if s.starts_with("--checkpoint-dir=") => {
+                checkpoint_dir = Some(PathBuf::from(&s["--checkpoint-dir=".len()..]));
+            }
             s if !s.starts_with('-') => {
                 if max_stem.is_some() {
                     return Err(format!("unexpected positional arg: {:?}", s));
@@ -112,6 +132,7 @@ fn parse_args() -> Result<Args, String> {
         style,
         output,
         resume_from,
+        checkpoint_dir,
     })
 }
 
@@ -136,7 +157,20 @@ fn main() -> ExitCode {
         }
     });
 
-    let table = match &args.resume_from {
+    // Set up the checkpoint directory (if any) before we start computing,
+    // so we fail fast on permission / missing-parent errors.
+    if let Some(dir) = &args.checkpoint_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("mkdir {}: {}", dir.display(), e);
+            return ExitCode::from(1);
+        }
+    }
+
+    // Build the starting table and figure out which stem to begin stepping from.
+    //   fresh:   new() → stem 0 not yet processed, start_k = 0
+    //   resumed: from_json has max_stem set, start_k = max_stem + 1
+    // A resumed table at or above MAX_STEM has nothing to do.
+    let (mut table, start_k, resumed) = match &args.resume_from {
         Some(path) => {
             let src = match std::fs::read_to_string(path) {
                 Ok(s) => s,
@@ -145,7 +179,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
-            let mut t = match CurtisTable::from_json(&src) {
+            let t = match CurtisTable::from_json(&src) {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("parse {}: {}", path.display(), e);
@@ -169,15 +203,40 @@ fn main() -> ExitCode {
                     "Loaded state from {} (stem {}); extending to stem {}...",
                     path.display(), t.max_stem, args.max_stem
                 );
-                t.extend_to(args.max_stem);
             }
-            t
+            let start = t.max_stem + 1;
+            (t, start, true)
         }
         None => {
             eprintln!("Computing Curtis table through stem {}...", args.max_stem);
-            CurtisTable::compute(args.max_stem)
+            (CurtisTable::new(), 0, false)
         }
     };
+
+    // Drive stem-by-stem so we can checkpoint (and report progress) after each.
+    // `resumed && start_k > args.max_stem` means we loaded exactly what was asked
+    // for; the loop body runs zero times and that's fine.
+    for k in start_k..=args.max_stem {
+        let t0 = std::time::Instant::now();
+        table.step(k);
+        let dt = t0.elapsed();
+
+        if let Some(dir) = &args.checkpoint_dir {
+            let path = dir.join(format!("state_{:02}.json", k));
+            let json = table.emit_json(k);
+            if let Err(e) = std::fs::write(&path, &json) {
+                eprintln!("write {}: {}", path.display(), e);
+                return ExitCode::from(1);
+            }
+            eprintln!(
+                "  stem {:>2}: {:.2}s  → {} ({} bytes)",
+                k, dt.as_secs_f64(), path.display(), json.len()
+            );
+        } else {
+            eprintln!("  stem {:>2}: {:.2}s", k, dt.as_secs_f64());
+        }
+    }
+    let _ = resumed; // silence unused-var if we don't act on it
 
     let body = match args.format {
         Format::Human => table.display(args.max_stem, style),
