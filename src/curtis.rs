@@ -150,19 +150,23 @@ impl CurtisTable {
 
     // ── Phase 1: populate column k ──────────────────────────────────────────
 
-    fn populate_column(&mut self, k: usize, max_stem: usize) {
+    fn populate_column(&mut self, k: usize, _max_stem: usize) {
         // Row 1: stem k portion of Λ(1).
         // Λ(1) is spanned by admissible monomials whose first generator is ≤ 0,
         // i.e. the unit and λ_0^p for all p ≥ 1.
+        //
+        // Optimization: λ_0^p for p ≥ 2 are `is_zero_tail_artifact` —
+        // pure bookkeeping that never shows up in the published output
+        // and (empirically verified against the pre-optimization oracle)
+        // doesn't affect non-artifact cocycle completion either.  Keeping
+        // them would blow up later stems' work via the survivor cascade
+        // (`λ_{n-1} · λ_0^p → λ_{n-1,0^p}`, each another artifact…).  So
+        // we only insert the unit and λ_0 here, and filter artifacts out
+        // of every product below.  `_max_stem` is kept in the signature
+        // for ABI stability — it no longer drives a `tail_cap`.
         if k == 0 {
-            self.insert_entry(0, 1, vec![]);           // unit
-            // Include λ_0^p tails — enough for genuine pairings plus a buffer.
-            // Each "real" differential typically targets entries with ≤1 trailing
-            // zero; the rest pair off mechanically via [k,0^p]→[k-1,0^{p+1}].
-            let tail_cap = (max_stem / 4).max(2);
-            for p in 1..=tail_cap {
-                self.insert_entry(0, 1, vec![0; p]);   // λ_0^p
-            }
+            self.insert_entry(0, 1, vec![]);     // unit
+            self.insert_entry(0, 1, vec![0]);    // λ_0
         }
 
         // Rows n ≥ 3: H_{k-n+1}(Λ(2n-1)), multiply survivors by λ_{n-1}.
@@ -182,8 +186,9 @@ impl CurtisTable {
                 };
                 let body = seq_to_element(&s);
                 let product = Element::from(prefix) * body;
-                // Each monomial in the product is an entry in row n.
+                // Each non-artifact monomial in the product is an entry in row n.
                 for mono in &product.0 {
+                    if is_zero_tail_artifact(&mono.seq.0) { continue; }
                     self.insert_entry(k, n, mono.seq.0.to_vec());
                 }
             }
@@ -239,8 +244,31 @@ impl CurtisTable {
             // Leading term = highest-filtration monomial (largest first generator).
             let leading = filtration_leading(&boundary);
 
-            // Check: is the leading term in the table and free?
-            if self.is_in_table(&leading) && !self.is_target(&leading) && !self.is_source(&leading) {
+            // Artifact leading term: we deliberately don't store artifact
+            // entries in the table (they used to cost 99.9% of the storage
+            // with no effect on the published output).  But the algorithm's
+            // bookkeeping still needs the source/target pairing to be sound:
+            // without it, `x` would be stranded as a fake survivor, and —
+            // worse — later stems would multiply that fake survivor by λ_{n-1}
+            // and cascade into a survivor explosion.  So record a "virtual"
+            // differential: mark both source and target as paired in the
+            // set-maps, skip inserting the target into `entries`.  `tgt_row`
+            // is stored for emit_json round-trip, but emit_json filters these
+            // out anyway via `is_zero_tail_artifact(&d.target)`.
+            if is_zero_tail_artifact(&leading) {
+                if !self.is_target(&leading) && !self.is_source(&leading) {
+                    // Synthetic tgt_row: we don't actually have a row for
+                    // artifact entries since we never inserted them.  0 is
+                    // fine — this field only feeds the JSON round-trip, and
+                    // both emit_json and the Python visualizer filter
+                    // artifact differentials out.
+                    self.record_differential(stem, row, original, 0, leading);
+                    return;
+                }
+                // If the artifact target is already paired (as someone's
+                // source or target), we fall through into the tail-search
+                // branch below — same as a non-artifact "not free" case.
+            } else if self.is_in_table(&leading) && !self.is_target(&leading) && !self.is_source(&leading) {
                 let tgt_row = self.row_of(&leading).unwrap();
                 self.record_differential(stem, row, original, tgt_row, leading);
                 return;
@@ -311,6 +339,7 @@ impl CurtisTable {
             let body = seq_to_element(&s);
             let product = Element::from(prefix) * body;
             for mono in &product.0 {
+                if is_zero_tail_artifact(&mono.seq.0) { continue; }
                 self.insert_entry(k, 2, mono.seq.0.to_vec());
             }
         }
@@ -318,23 +347,25 @@ impl CurtisTable {
 
     // ── Main driver ─────────────────────────────────────────────────────────
 
+    /// Compute a single stem `k`.  Assumes stems `0..k` have already been
+    /// processed (or `k == 0` on a fresh table).  Afterwards `max_stem == k`.
+    /// `compute` and `extend_to` are thin loops over this.
+    pub fn step(&mut self, k: usize) {
+        // Phase 1: populate (rows ≥ 3 and row 1)
+        self.populate_column(k, 0);
+        // Phase 2: differentials
+        self.compute_differentials(k);
+        // Phase 1b: row 2 (needs differentials from this column)
+        self.fill_row_2(k);
+        self.max_stem = k;
+    }
+
     /// Run the Curtis algorithm up to and including stem `max_stem`.
     pub fn compute(max_stem: usize) -> Self {
         let mut table = Self::new();
-
         for k in 0..=max_stem {
-            // Phase 1: populate (rows ≥ 3 and row 1)
-            table.populate_column(k, max_stem);
-
-            // Phase 2: differentials
-            table.compute_differentials(k);
-
-            // Phase 1b: row 2 (needs differentials from this column)
-            table.fill_row_2(k);
-
-            table.max_stem = k;
+            table.step(k);
         }
-
         table
     }
 
@@ -664,27 +695,16 @@ impl CurtisTable {
     }
 
     /// Rebuild a `CurtisTable` from a JSON report previously emitted by
-    /// `emit_json`.  The JSON holds only non-artifact state; we
-    /// reconstruct the one bit of artifact state that actually matters
-    /// for resumed computation — the `λ_0^p` padding in stem 0, row 1 —
-    /// from `max_stem` (which determines `tail_cap`).  Everything else
-    /// in the artifact world is regenerated on demand as `extend_to`
-    /// processes new stems.
+    /// `emit_json`.  The JSON holds non-artifact state only; since the
+    /// algorithm no longer produces or consults artifacts internally
+    /// (see `populate_column`), there is nothing to reconstruct beyond
+    /// replaying the stored entries and differentials.
     pub fn from_json(src: &str) -> Result<Self, String> {
         let root = json::Parser::new(src).parse_value()?;
         let max_stem = root.get("max_stem")?.as_num()? as usize;
 
         let mut table = Self::new();
         table.max_stem = max_stem;
-
-        // Restore λ_0^p padding in stem 0 row 1 (artifact entries that
-        // were stripped at emit time) so subsequent populate_column calls
-        // can pick them up as survivors when building new stems.  The
-        // unit and [0] are non-artifact and round-trip via the JSON.
-        let tail_cap = (max_stem / 4).max(2);
-        for p in 2..=tail_cap {
-            table.insert_entry(0, 1, vec![0; p]);
-        }
 
         for e in root.get("entries")?.as_arr()? {
             let stem = e.get("stem")?.as_num()? as usize;
@@ -707,31 +727,12 @@ impl CurtisTable {
 
     /// Extend an already-built table to cover stems up to `new_max_stem`.
     /// No-op if `new_max_stem <= self.max_stem`.
-    ///
-    /// The only piece of state that depends on the *final* `max_stem` (as
-    /// opposed to the stems processed so far) is `tail_cap`, the count of
-    /// `λ_0^p` bookkeeping entries in stem 0 row 1.  If the new target
-    /// grows `tail_cap`, we append the missing ones before resuming —
-    /// replicating exactly the state a fresh `compute(new_max_stem)` would
-    /// have produced by the time it reached stem `self.max_stem + 1`.
     pub fn extend_to(&mut self, new_max_stem: usize) {
         if new_max_stem <= self.max_stem {
             return;
         }
-
-        let old_cap = (self.max_stem / 4).max(2);
-        let new_cap = (new_max_stem / 4).max(2);
-        if new_cap > old_cap {
-            for p in (old_cap + 1)..=new_cap {
-                self.insert_entry(0, 1, vec![0; p]);
-            }
-        }
-
         for k in (self.max_stem + 1)..=new_max_stem {
-            self.populate_column(k, new_max_stem);
-            self.compute_differentials(k);
-            self.fill_row_2(k);
-            self.max_stem = k;
+            self.step(k);
         }
     }
 }
