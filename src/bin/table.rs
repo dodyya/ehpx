@@ -17,6 +17,10 @@ options:
                   portability across viewers.
   --color         force ANSI color (default when stdout is a terminal).
   --json          emit machine-readable JSON instead of the human report.
+  --from PATH     resume from a previously-emitted JSON state file; extends
+                  the saved computation up to MAX_STEM.  MAX_STEM must be
+                  ≥ the saved max_stem.  Output format / destination still
+                  controlled by the flags above.
   -o, --output PATH
                   write output to PATH instead of stdout.  Turns off ANSI
                   unless --color is also given.
@@ -27,6 +31,8 @@ examples:
   table 12 --plain -o report.txt           # save .txt report
   table 12 --ascii -o report.txt           # strict ASCII .txt report
   table 12 --json -o report.json           # JSON for Python visualizer
+  table 26 --from state24.json --json -o state26.json
+                                           # resume 24 → 26
 "
 }
 
@@ -40,6 +46,7 @@ struct Args {
     format: Format,
     style: Option<RenderStyle>, // None = auto-detect
     output: Option<PathBuf>,
+    resume_from: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -47,6 +54,7 @@ fn parse_args() -> Result<Args, String> {
     let mut format = Format::Human;
     let mut style: Option<RenderStyle> = None;
     let mut output: Option<PathBuf> = None;
+    let mut resume_from: Option<PathBuf> = None;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -74,6 +82,16 @@ fn parse_args() -> Result<Args, String> {
             s if s.starts_with("-o") && s.len() > 2 => {
                 output = Some(PathBuf::from(&s[2..]));
             }
+            "--from" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err(format!("{} needs an argument", a));
+                }
+                resume_from = Some(PathBuf::from(&argv[i]));
+            }
+            s if s.starts_with("--from=") => {
+                resume_from = Some(PathBuf::from(&s["--from=".len()..]));
+            }
             s if !s.starts_with('-') => {
                 if max_stem.is_some() {
                     return Err(format!("unexpected positional arg: {:?}", s));
@@ -93,6 +111,7 @@ fn parse_args() -> Result<Args, String> {
         format,
         style,
         output,
+        resume_from,
     })
 }
 
@@ -117,8 +136,48 @@ fn main() -> ExitCode {
         }
     });
 
-    eprintln!("Computing Curtis table through stem {}...", args.max_stem);
-    let table = CurtisTable::compute(args.max_stem);
+    let table = match &args.resume_from {
+        Some(path) => {
+            let src = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("read {}: {}", path.display(), e);
+                    return ExitCode::from(1);
+                }
+            };
+            let mut t = match CurtisTable::from_json(&src) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("parse {}: {}", path.display(), e);
+                    return ExitCode::from(1);
+                }
+            };
+            if args.max_stem < t.max_stem {
+                eprintln!(
+                    "MAX_STEM ({}) < saved max_stem ({}); cannot shrink.",
+                    args.max_stem, t.max_stem
+                );
+                return ExitCode::from(2);
+            }
+            if args.max_stem == t.max_stem {
+                eprintln!(
+                    "Loaded state from {} (stem {}); nothing to extend.",
+                    path.display(), t.max_stem
+                );
+            } else {
+                eprintln!(
+                    "Loaded state from {} (stem {}); extending to stem {}...",
+                    path.display(), t.max_stem, args.max_stem
+                );
+                t.extend_to(args.max_stem);
+            }
+            t
+        }
+        None => {
+            eprintln!("Computing Curtis table through stem {}...", args.max_stem);
+            CurtisTable::compute(args.max_stem)
+        }
+    };
 
     let body = match args.format {
         Format::Human => table.display(args.max_stem, style),

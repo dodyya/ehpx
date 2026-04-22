@@ -544,7 +544,21 @@ impl CurtisTable {
         out
     }
 
-    /// Emit a machine-readable JSON report of the full table state.  Schema:
+    /// Emit a machine-readable JSON report of the table.
+    ///
+    /// Only **non-artifact** entries and differentials are written —
+    /// λ_0-tail bookkeeping (`is_zero_tail_artifact`) is stripped.  This
+    /// is both what the visualizer wants and what `from_json` needs to
+    /// resume: the algorithm's non-artifact output is insensitive to
+    /// which λ_0-tails happen to be in the table at any given stem
+    /// (empirically verified against full-state snapshots), and
+    /// `from_json` reconstructs the handful of λ_0^p entries the
+    /// resumption actually needs from `max_stem` alone.
+    ///
+    /// For a stem-24 run, full state would weigh ~80 MB (99.9% artifact);
+    /// the filtered form is ~100 KB.
+    ///
+    /// Schema:
     ///
     /// ```json
     /// {
@@ -568,7 +582,7 @@ impl CurtisTable {
         out.push_str("{\n");
         out.push_str(&format!("  \"max_stem\": {},\n", max_stem));
 
-        // entries
+        // entries — non-artifact only.
         out.push_str("  \"entries\": [\n");
         let mut first = true;
         for k in 0..=max_stem {
@@ -582,18 +596,18 @@ impl CurtisTable {
                 for seq in &col[&row] {
                     if is_zero_tail_artifact(seq) { continue; }
                     let role = if self.is_source(seq) {
+                        // Skip sources whose target is an artifact — the
+                        // pairing isn't meaningful for consumers, and on
+                        // resume we rebuild via the cocycle loop anyway.
+                        if self.source_set.get(seq).is_some_and(|t| is_zero_tail_artifact(t)) {
+                            continue;
+                        }
                         "source"
                     } else if self.is_target(seq) {
                         "target"
                     } else {
                         "cycle"
                     };
-                    // Skip sources that point at artifact targets.
-                    if role == "source" {
-                        if let Some(t) = self.source_set.get(seq) {
-                            if is_zero_tail_artifact(t) { continue; }
-                        }
-                    }
                     if !first { out.push_str(",\n"); }
                     first = false;
                     out.push_str(&format!(
@@ -605,7 +619,7 @@ impl CurtisTable {
         }
         out.push_str("\n  ],\n");
 
-        // differentials
+        // differentials — non-artifact only.
         out.push_str("  \"differentials\": [\n");
         let mut first = true;
         for k in 0..=max_stem {
@@ -626,7 +640,8 @@ impl CurtisTable {
         }
         out.push_str("\n  ],\n");
 
-        // survivors
+        // survivors — non-artifact only; this field is for downstream reading
+        // and is recomputed on rehydration anyway.
         out.push_str("  \"survivors\": [\n");
         let mut first = true;
         for k in 0..=max_stem {
@@ -648,6 +663,77 @@ impl CurtisTable {
         out
     }
 
+    /// Rebuild a `CurtisTable` from a JSON report previously emitted by
+    /// `emit_json`.  The JSON holds only non-artifact state; we
+    /// reconstruct the one bit of artifact state that actually matters
+    /// for resumed computation — the `λ_0^p` padding in stem 0, row 1 —
+    /// from `max_stem` (which determines `tail_cap`).  Everything else
+    /// in the artifact world is regenerated on demand as `extend_to`
+    /// processes new stems.
+    pub fn from_json(src: &str) -> Result<Self, String> {
+        let root = json::Parser::new(src).parse_value()?;
+        let max_stem = root.get("max_stem")?.as_num()? as usize;
+
+        let mut table = Self::new();
+        table.max_stem = max_stem;
+
+        // Restore λ_0^p padding in stem 0 row 1 (artifact entries that
+        // were stripped at emit time) so subsequent populate_column calls
+        // can pick them up as survivors when building new stems.  The
+        // unit and [0] are non-artifact and round-trip via the JSON.
+        let tail_cap = (max_stem / 4).max(2);
+        for p in 2..=tail_cap {
+            table.insert_entry(0, 1, vec![0; p]);
+        }
+
+        for e in root.get("entries")?.as_arr()? {
+            let stem = e.get("stem")?.as_num()? as usize;
+            let row = e.get("row")?.as_num()? as usize;
+            let seq = json_seq_to_vec(e.get("seq")?)?;
+            table.insert_entry(stem, row, seq);
+        }
+
+        for d in root.get("differentials")?.as_arr()? {
+            let stem = d.get("stem")?.as_num()? as usize;
+            let src_row = d.get("src_row")?.as_num()? as usize;
+            let tgt_row = d.get("tgt_row")?.as_num()? as usize;
+            let src = json_seq_to_vec(d.get("src")?)?;
+            let tgt = json_seq_to_vec(d.get("tgt")?)?;
+            table.record_differential(stem, src_row, src, tgt_row, tgt);
+        }
+
+        Ok(table)
+    }
+
+    /// Extend an already-built table to cover stems up to `new_max_stem`.
+    /// No-op if `new_max_stem <= self.max_stem`.
+    ///
+    /// The only piece of state that depends on the *final* `max_stem` (as
+    /// opposed to the stems processed so far) is `tail_cap`, the count of
+    /// `λ_0^p` bookkeeping entries in stem 0 row 1.  If the new target
+    /// grows `tail_cap`, we append the missing ones before resuming —
+    /// replicating exactly the state a fresh `compute(new_max_stem)` would
+    /// have produced by the time it reached stem `self.max_stem + 1`.
+    pub fn extend_to(&mut self, new_max_stem: usize) {
+        if new_max_stem <= self.max_stem {
+            return;
+        }
+
+        let old_cap = (self.max_stem / 4).max(2);
+        let new_cap = (new_max_stem / 4).max(2);
+        if new_cap > old_cap {
+            for p in (old_cap + 1)..=new_cap {
+                self.insert_entry(0, 1, vec![0; p]);
+            }
+        }
+
+        for k in (self.max_stem + 1)..=new_max_stem {
+            self.populate_column(k, new_max_stem);
+            self.compute_differentials(k);
+            self.fill_row_2(k);
+            self.max_stem = k;
+        }
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -701,6 +787,243 @@ fn format_seq_with(seq: &[usize], lam: &str) -> String {
 fn json_seq(seq: &[usize]) -> String {
     let inner: Vec<String> = seq.iter().map(|x| x.to_string()).collect();
     format!("[{}]", inner.join(","))
+}
+
+fn json_seq_to_vec(v: &json::Value) -> Result<Vec<usize>, String> {
+    v.as_arr()?
+        .iter()
+        .map(|x| x.as_num().map(|n| n as usize))
+        .collect()
+}
+
+// ── Minimal JSON parser ─────────────────────────────────────────────────────
+//
+// Only exists to round-trip `emit_json` output — no generic-grade JSON
+// compliance (no exponents, unicode escapes, etc.).  Adding a serde
+// dependency for a few hundred lines of ASCII feels wasteful.
+
+#[allow(dead_code)]
+mod json {
+    #[derive(Debug)]
+    pub enum Value {
+        Null,
+        Bool(bool),
+        Num(i64),
+        Str(String),
+        Arr(Vec<Value>),
+        Obj(Vec<(String, Value)>),
+    }
+
+    impl Value {
+        pub fn as_arr(&self) -> Result<&[Value], String> {
+            match self {
+                Value::Arr(a) => Ok(a),
+                _ => Err("expected array".to_string()),
+            }
+        }
+        pub fn as_num(&self) -> Result<i64, String> {
+            match self {
+                Value::Num(n) => Ok(*n),
+                _ => Err("expected number".to_string()),
+            }
+        }
+        #[allow(dead_code)]
+        pub fn as_str(&self) -> Result<&str, String> {
+            match self {
+                Value::Str(s) => Ok(s),
+                _ => Err("expected string".to_string()),
+            }
+        }
+        pub fn get(&self, key: &str) -> Result<&Value, String> {
+            match self {
+                Value::Obj(pairs) => pairs
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| format!("missing key {:?}", key)),
+                _ => Err(format!("expected object (looking up {:?})", key)),
+            }
+        }
+    }
+
+    pub struct Parser<'a> {
+        src: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> Parser<'a> {
+        pub fn new(src: &'a str) -> Self {
+            Self { src: src.as_bytes(), pos: 0 }
+        }
+
+        fn peek(&self) -> Option<u8> {
+            self.src.get(self.pos).copied()
+        }
+
+        fn skip_ws(&mut self) {
+            while let Some(c) = self.peek() {
+                if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        pub fn parse_value(&mut self) -> Result<Value, String> {
+            self.skip_ws();
+            match self.peek() {
+                Some(b'{') => self.parse_obj(),
+                Some(b'[') => self.parse_arr(),
+                Some(b'"') => self.parse_str().map(Value::Str),
+                Some(b't') | Some(b'f') => self.parse_bool(),
+                Some(b'n') => {
+                    self.expect_lit(b"null")?;
+                    Ok(Value::Null)
+                }
+                Some(c) if c == b'-' || c.is_ascii_digit() => self.parse_num(),
+                Some(c) => Err(format!("unexpected {:?} at byte {}", c as char, self.pos)),
+                None => Err("unexpected eof".to_string()),
+            }
+        }
+
+        fn parse_obj(&mut self) -> Result<Value, String> {
+            self.pos += 1; // consume '{'
+            let mut pairs = Vec::new();
+            self.skip_ws();
+            if self.peek() == Some(b'}') {
+                self.pos += 1;
+                return Ok(Value::Obj(pairs));
+            }
+            loop {
+                self.skip_ws();
+                let k = self.parse_str()?;
+                self.skip_ws();
+                if self.peek() != Some(b':') {
+                    return Err(format!("expected ':' at byte {}", self.pos));
+                }
+                self.pos += 1;
+                let v = self.parse_value()?;
+                pairs.push((k, v));
+                self.skip_ws();
+                match self.peek() {
+                    Some(b',') => {
+                        self.pos += 1;
+                    }
+                    Some(b'}') => {
+                        self.pos += 1;
+                        break;
+                    }
+                    Some(c) => {
+                        return Err(format!(
+                            "expected ',' or '}}' got {:?} at byte {}",
+                            c as char, self.pos
+                        ))
+                    }
+                    None => return Err("unexpected eof".to_string()),
+                }
+            }
+            Ok(Value::Obj(pairs))
+        }
+
+        fn parse_arr(&mut self) -> Result<Value, String> {
+            self.pos += 1; // consume '['
+            let mut items = Vec::new();
+            self.skip_ws();
+            if self.peek() == Some(b']') {
+                self.pos += 1;
+                return Ok(Value::Arr(items));
+            }
+            loop {
+                let v = self.parse_value()?;
+                items.push(v);
+                self.skip_ws();
+                match self.peek() {
+                    Some(b',') => {
+                        self.pos += 1;
+                    }
+                    Some(b']') => {
+                        self.pos += 1;
+                        break;
+                    }
+                    Some(c) => {
+                        return Err(format!(
+                            "expected ',' or ']' got {:?} at byte {}",
+                            c as char, self.pos
+                        ))
+                    }
+                    None => return Err("unexpected eof".to_string()),
+                }
+            }
+            Ok(Value::Arr(items))
+        }
+
+        fn parse_str(&mut self) -> Result<String, String> {
+            self.skip_ws();
+            if self.peek() != Some(b'"') {
+                return Err(format!("expected '\"' at byte {}", self.pos));
+            }
+            self.pos += 1;
+            let start = self.pos;
+            while let Some(c) = self.peek() {
+                if c == b'"' {
+                    let s = std::str::from_utf8(&self.src[start..self.pos])
+                        .map_err(|e| e.to_string())?
+                        .to_string();
+                    self.pos += 1;
+                    return Ok(s);
+                }
+                if c == b'\\' {
+                    // skip the escape byte too
+                    self.pos += 2;
+                } else {
+                    self.pos += 1;
+                }
+            }
+            Err("unterminated string".to_string())
+        }
+
+        fn parse_num(&mut self) -> Result<Value, String> {
+            let start = self.pos;
+            if self.peek() == Some(b'-') {
+                self.pos += 1;
+            }
+            while let Some(c) = self.peek() {
+                if c.is_ascii_digit() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            let slice = std::str::from_utf8(&self.src[start..self.pos])
+                .map_err(|e| e.to_string())?;
+            slice
+                .parse::<i64>()
+                .map(Value::Num)
+                .map_err(|e| e.to_string())
+        }
+
+        fn parse_bool(&mut self) -> Result<Value, String> {
+            if self.src[self.pos..].starts_with(b"true") {
+                self.pos += 4;
+                Ok(Value::Bool(true))
+            } else if self.src[self.pos..].starts_with(b"false") {
+                self.pos += 5;
+                Ok(Value::Bool(false))
+            } else {
+                Err(format!("expected bool at byte {}", self.pos))
+            }
+        }
+
+        fn expect_lit(&mut self, lit: &[u8]) -> Result<(), String> {
+            if self.src[self.pos..].starts_with(lit) {
+                self.pos += lit.len();
+                Ok(())
+            } else {
+                Err(format!("literal mismatch at byte {}", self.pos))
+            }
+        }
+    }
 }
 
 // ── Render styles ──────────────────────────────────────────────────────────

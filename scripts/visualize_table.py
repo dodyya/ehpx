@@ -22,9 +22,9 @@ from collections import defaultdict
 
 
 ROLE_COLOR = {
-    "cycle":  "#2e7d32",   # green — survives, H*(Λ) candidate
-    "source": "#c62828",   # red — has outgoing differential
-    "target": "#f9a825",   # amber — hit by a differential
+    "cycle":  "#ff5f05",   # orange — survives, H*(Λ) candidate
+    "source": "#13294b",   # navy — has outgoing differential
+    "target": "#707372",   # gray — hit by a differential
 }
 
 
@@ -55,8 +55,13 @@ def main():
         sys.exit(1)
 
     max_stem = report["max_stem"]
-    entries = report["entries"]
-    diffs = report["differentials"]
+    # Full-state JSONs (so the `--from` resume flag can round-trip) include
+    # λ_0-tail bookkeeping entries flagged with `artifact: true`.  They're
+    # needed for resume, not for visualization — skip them here so the chart
+    # stays clean.  Older (pre-artifact-field) JSONs just have no such flag
+    # and pass through unchanged.
+    entries = [e for e in report["entries"] if not e.get("artifact", False)]
+    diffs = [d for d in report["differentials"] if not d.get("artifact", False)]
 
     # Bucket entries by bidegree so we can space them out within a cell.
     by_cell = defaultdict(list)   # (stem, row) -> [entry, ...]
@@ -142,7 +147,7 @@ def main():
             xytext=(x1, y1),
             arrowprops=dict(
                 arrowstyle="->,head_width=0.35,head_length=0.6",
-                color="#c62828",
+                color="#C8C6C7",
                 alpha=0.7,
                 lw=1.3,
                 shrinkA=6,

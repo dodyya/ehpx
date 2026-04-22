@@ -1,3 +1,10 @@
 /target
 __pycache__/
 out.txt
+
+# local Curtis-table runs (JSON state snapshots, renders, text reports)
+state*.json
+report*.json
+report*.txt
+*out.json
+curtis*.png

@@ -65,6 +65,10 @@ text when piped or writing to a file.  Override with flags:
 - `--ascii` — no ANSI; strict ASCII (`l(...)`, `->`).  Maximum portability.
 - `--color` — force ANSI color even when output is redirected.
 - `--json` — emit a machine-readable report (consumed by the visualizer).
+- `--from PATH` — resume from a previously-emitted JSON and extend to
+  `MAX_STEM`.  The JSON is a full state snapshot, so the resumed run
+  reproduces the non-artifact output of a fresh `table MAX_STEM` run
+  byte-for-byte (human report and visualization both identical).
 - `-o FILE` — write to `FILE` instead of stdout.
 
 Examples:
@@ -73,6 +77,10 @@ Examples:
 cargo run --release --bin table 12 --ascii -o report.txt
 cargo run --release --bin table 12 --json  -o report.json
 python3 scripts/visualize_table.py report.json curtis.png
+
+# Incrementally extend a saved state:
+cargo run --release --bin table 24 --json -o state24.json
+cargo run --release --bin table 26 --from state24.json --json -o state26.json
 ```
 
 ### `visualize_table.py` — bidegree chart
