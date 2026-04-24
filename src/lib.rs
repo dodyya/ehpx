@@ -75,8 +75,15 @@ impl Element {
     }
 
     pub fn diff(self) -> Self {
+        self.diff_ref()
+    }
+
+    /// Like `diff`, but borrows instead of consuming.  Hot path for
+    /// `complete_cocycle`, which calls `d(x)` on a growing element every
+    /// iteration — cloning it just to hand `diff` ownership was pure waste.
+    pub fn diff_ref(&self) -> Self {
         let mut result = Element::zero();
-        for mono in self.0 {
+        for mono in &self.0 {
             result = result + diff_mono(&mono.seq.0);
         }
         result

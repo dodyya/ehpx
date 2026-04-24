@@ -48,6 +48,11 @@ pub struct CurtisTable {
     target_set: HashMap<Vec<usize>, (usize, usize)>,  // seq → (stem, source_row)
     /// Quick lookup: sequence → true if it is the *source* of some differential
     source_set: HashMap<Vec<usize>, Vec<usize>>,  // source_seq → target_seq
+    /// Reverse index: target_seq → source_seq.  Needed by `complete_cocycle`
+    /// to patch via `prefix · z` where z is the source hitting the matched
+    /// tail.  Without this, the lookup is a linear scan over `source_set`
+    /// — hot path, and `source_set` grows quadratically with stems.
+    target_to_source: HashMap<Vec<usize>, Vec<usize>>,
     /// Maximum stem computed so far.
     pub max_stem: usize,
 }
@@ -59,6 +64,7 @@ impl CurtisTable {
             differentials: BTreeMap::new(),
             target_set: HashMap::new(),
             source_set: HashMap::new(),
+            target_to_source: HashMap::new(),
             max_stem: 0,
         }
     }
@@ -77,6 +83,7 @@ impl CurtisTable {
     fn record_differential(&mut self, stem: usize, src_row: usize, src: Vec<usize>, tgt_row: usize, tgt: Vec<usize>) {
         self.source_set.insert(src.clone(), tgt.clone());
         self.target_set.insert(tgt.clone(), (stem, src_row));
+        self.target_to_source.insert(tgt.clone(), src.clone());
         self.differentials
             .entry(stem)
             .or_default()
@@ -231,18 +238,51 @@ impl CurtisTable {
     ///   splice in the source, and recurse with the full adjusted element.
     fn complete_cocycle(&mut self, stem: usize, row: usize, seq: Vec<usize>) {
         let original = seq.clone();
-        // Track the full (multi-term) element, not just the leading monomial.
+        // Track the full (multi-term) element *and* its boundary.  We maintain
+        // the boundary incrementally: since d is F₂-linear,
+        //     d(x + patch) = d(x) + d(patch)
+        // so after a patch we only need to diff the (small) patch and merge
+        // into `current_boundary`, instead of re-diffing the whole (growing)
+        // current_elem every iteration.  For high-stem entries the elem can
+        // accumulate thousands of monomials — the naive recompute is the
+        // loop's hot spot.
         let mut current_elem = seq_to_element(&seq);
+        let mut current_boundary = current_elem.diff_ref();
 
-        for _guard in 0..200 {
-            let boundary = current_elem.clone().diff();
-
-            if boundary.0.is_empty() {
+        // Safety cap.  The loop terminates naturally: each iteration either
+        // returns (d(x)=0, leading is free and we record, no tail matches so
+        // x is a cycle, or patch zeroed x) or the leading monomial strictly
+        // decreases in lex order.  There are finitely many admissible
+        // monomials at a given stem, so iteration is bounded.  The cap is a
+        // bug-guard: if we ever regress and leading stops decreasing, fail
+        // loudly instead of spinning forever.
+        //
+        // Historical note: this was 200, which silently cut off high-stem
+        // high-filtration completions (e.g. 27-stem row 9, which legitimately
+        // takes ~750 steps to patch down to row 2).  Those entries were
+        // stranded as fake survivors, cascading into spurious entries and
+        // missing differentials at stems ≥ 27.
+        let mut prev_leading: Option<Vec<usize>> = None;
+        const SAFETY_CAP: usize = 100_000;
+        for _guard in 0..SAFETY_CAP {
+            if current_boundary.0.is_empty() {
                 return; // d(x) = 0, permanent cycle candidate
             }
 
             // Leading term = highest-filtration monomial (largest first generator).
-            let leading = filtration_leading(&boundary);
+            let leading = filtration_leading(&current_boundary);
+
+            // Termination invariant: if we patched last iteration, the new
+            // leading must be strictly less (in lex) than the previous one.
+            // If not, we'd spin forever.
+            if let Some(prev) = &prev_leading {
+                debug_assert!(
+                    leading.as_slice() < prev.as_slice(),
+                    "complete_cocycle regression: leading {:?} did not strictly decrease below {:?} (stem {}, row {}, original {:?})",
+                    leading, prev, stem, row, original
+                );
+            }
+            prev_leading = Some(leading.clone());
 
             // Artifact leading term: we deliberately don't store artifact
             // entries in the table (they used to cost 99.9% of the storage
@@ -282,16 +322,19 @@ impl CurtisTable {
             let mut found = false;
             for ell in 0..leading.len() {
                 let tail = &leading[ell..];
-                if let Some((_stem, _src_row)) = self.target_set.get(tail) {
+                if self.target_set.contains_key(tail) {
                     // `tail` is hit by `z` under some differential.
                     let z = self.find_source_of_target(tail).unwrap();
-                    // x ← x + prefix · z  (cancels the leading·tail component)
+                    // x ← x + prefix · z  (cancels the leading·tail component).
+                    // Update boundary incrementally: d(x + p) = d(x) + d(p).
                     let prefix = &leading[..ell];
                     let prefix_elem = seq_to_element(prefix);
                     let z_elem = seq_to_element(&z);
                     let patch = prefix_elem * z_elem;
+                    let patch_boundary = patch.diff_ref();
 
                     current_elem = current_elem + patch;
+                    current_boundary = current_boundary + patch_boundary;
 
                     if current_elem.0.is_empty() {
                         // x became zero — it was a boundary all along
@@ -312,14 +355,9 @@ impl CurtisTable {
     }
 
     /// Find the source sequence that maps to `target` under a differential.
+    /// O(1) via the `target_to_source` reverse index.
     fn find_source_of_target(&self, target: &[usize]) -> Option<Vec<usize>> {
-        // Reverse lookup through source_set.
-        for (src, tgt) in &self.source_set {
-            if tgt.as_slice() == target {
-                return Some(src.clone());
-            }
-        }
-        None
+        self.target_to_source.get(target).cloned()
     }
 
     // ── Phase 1b: fill row 2 after differentials are known ──────────────────
