@@ -1,4 +1,4 @@
-<img width="3500" height="1100" alt="curtis" src="https://github.com/user-attachments/assets/1e49f4cd-cfbf-4ed5-ae7d-be7c60dd7286" />
+<img width="3500" height="1900" alt="curtis" src="https://github.com/user-attachments/assets/1e49f4cd-cfbf-4ed5-ae7d-be7c60dd7286" />
 
 # ehpx
 
