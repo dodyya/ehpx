@@ -37,6 +37,133 @@ pub struct Differential {
     pub stem: usize,
 }
 
+/// What `propose_cocycle` decided.  The serial committer applies it (or
+/// re-proposes against fresher state if a sibling commit invalidated it).
+#[derive(Clone, Debug)]
+enum Outcome {
+    /// Record `src → tgt` (target lives at `tgt_row`).  Stable as long as
+    /// `tgt` hasn't been claimed by some other entry that committed first.
+    Diff { src: Vec<usize>, tgt: Vec<usize>, tgt_row: usize },
+    /// Artifact (zero-tail) virtual differential — `tgt_row` is synthetic.
+    Artifact { src: Vec<usize>, tgt: Vec<usize> },
+    /// No differential to record.  `last_leading=None` means the boundary
+    /// went to zero (initial d(seq)=0 or elem zeroed via patches) — stable
+    /// under sibling commits.  `last_leading=Some(L)` means propose gave up
+    /// because no tail of L was a target; if a sibling commit later added
+    /// such a tail to `target_set`, we must re-propose.
+    NoDiff { src: Vec<usize>, last_leading: Option<Vec<usize>> },
+}
+
+/// Read-only view of the table, sharable across threads via `&Snapshot`.
+/// Holds borrows of just the maps `propose_cocycle` reads — `&CurtisTable`
+/// would also work, but `Snapshot` documents the read set and lets the
+/// borrow checker confirm we never call any mutating method during scope.
+struct Snapshot<'a> {
+    entries: &'a BTreeMap<usize, BTreeMap<usize, Vec<Vec<usize>>>>,
+    target_set: &'a HashMap<Vec<usize>, (usize, usize)>,
+    target_to_source: &'a HashMap<Vec<usize>, Vec<usize>>,
+    source_set: &'a HashMap<Vec<usize>, Vec<usize>>,
+}
+
+impl<'a> Snapshot<'a> {
+    fn from_table(t: &'a CurtisTable) -> Self {
+        Self {
+            entries: &t.entries,
+            target_set: &t.target_set,
+            target_to_source: &t.target_to_source,
+            source_set: &t.source_set,
+        }
+    }
+    fn is_target(&self, seq: &[usize]) -> bool { self.target_set.contains_key(seq) }
+    fn is_source(&self, seq: &[usize]) -> bool { self.source_set.contains_key(seq) }
+    fn is_in_table(&self, seq: &[usize]) -> bool {
+        let deg: usize = seq.iter().sum();
+        if let Some(rows) = self.entries.get(&deg) {
+            for entries in rows.values() {
+                if entries.iter().any(|s| s == seq) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    fn row_of(&self, seq: &[usize]) -> Option<usize> {
+        let deg: usize = seq.iter().sum();
+        if let Some(rows) = self.entries.get(&deg) {
+            for (&row, entries) in rows {
+                if entries.iter().any(|s| s == seq) {
+                    return Some(row);
+                }
+            }
+        }
+        None
+    }
+    fn find_source_of_target(&self, target: &[usize]) -> Option<Vec<usize>> {
+        self.target_to_source.get(target).cloned()
+    }
+}
+
+/// Pure version of `complete_cocycle`: produces an `Outcome` against `snap`
+/// without touching the table.  Same algorithm and termination invariants —
+/// see comments on `complete_cocycle`.  Safe to call from worker threads.
+fn propose_cocycle(snap: &Snapshot<'_>, stem: usize, row: usize, seq: Vec<usize>) -> Outcome {
+    let original = seq.clone();
+    let mut current_elem = seq_to_element(&seq);
+    let mut current_boundary = current_elem.diff_ref();
+
+    let mut prev_leading: Option<Vec<usize>> = None;
+    const SAFETY_CAP: usize = 100_000;
+    for _guard in 0..SAFETY_CAP {
+        if current_boundary.0.is_empty() {
+            return Outcome::NoDiff { src: original, last_leading: None };
+        }
+        let leading = filtration_leading(&current_boundary);
+        if let Some(prev) = &prev_leading {
+            debug_assert!(
+                leading.as_slice() < prev.as_slice(),
+                "propose_cocycle regression: leading {:?} did not strictly decrease below {:?} (stem {}, row {}, original {:?})",
+                leading, prev, stem, row, original
+            );
+        }
+        prev_leading = Some(leading.clone());
+
+        if is_zero_tail_artifact(&leading) {
+            if !snap.is_target(&leading) && !snap.is_source(&leading) {
+                return Outcome::Artifact { src: original, tgt: leading };
+            }
+        } else if snap.is_in_table(&leading) && !snap.is_target(&leading) && !snap.is_source(&leading) {
+            let tgt_row = snap.row_of(&leading).unwrap();
+            return Outcome::Diff { src: original, tgt: leading, tgt_row };
+        }
+
+        let mut found = false;
+        for ell in 0..leading.len() {
+            let tail = &leading[ell..];
+            if snap.target_set.contains_key(tail) {
+                let z = snap.find_source_of_target(tail).unwrap();
+                let prefix = &leading[..ell];
+                let prefix_elem = seq_to_element(prefix);
+                let z_elem = seq_to_element(&z);
+                let patch = prefix_elem * z_elem;
+                let patch_boundary = patch.diff_ref();
+                current_elem = current_elem + patch;
+                current_boundary = current_boundary + patch_boundary;
+                if current_elem.0.is_empty() {
+                    return Outcome::NoDiff { src: original, last_leading: None };
+                }
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Outcome::NoDiff { src: original, last_leading: Some(leading) };
+        }
+    }
+    // Hit safety cap.  Treat as a (suspicious) cycle outcome; the debug
+    // assert above would have already fired in a debug build.
+    Outcome::NoDiff { src: original, last_leading: prev_leading }
+}
+
 /// The full Curtis table.
 #[derive(Debug)]
 pub struct CurtisTable {
@@ -212,6 +339,20 @@ impl CurtisTable {
             vec![]
         };
 
+        // Spawn-per-task threshold.  Below this, parallel-propose's
+        // overhead (thread spawn, snapshot capture, commit re-checks) is
+        // bigger than the saved work.  Profiled: low stems ≤ 30 spend
+        // microseconds total here, so going parallel is pure overhead.
+        const PARALLEL_THRESHOLD: usize = 4;
+
+        // Cap how many proposers we run concurrently.  18 is the largest
+        // row-size we observe through stem 40; more cores than that gives
+        // diminishing returns and oversubscribes the OS scheduler when
+        // we're also doing work in the main thread.
+        let n_workers: usize = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
+
         for row in rows {
             // Snapshot the entries for this row (we may modify the table as we go).
             let entries: Vec<Vec<usize>> = self.entries
@@ -219,12 +360,116 @@ impl CurtisTable {
                 .and_then(|col| col.get(&row))
                 .cloned()
                 .unwrap_or_default();
+            let unpaired: Vec<Vec<usize>> = entries
+                .into_iter()
+                .filter(|seq| !self.is_source(seq) && !self.is_target(seq))
+                .collect();
 
-            for seq in entries {
-                if self.is_source(&seq) || self.is_target(&seq) {
-                    continue; // already paired
+            if unpaired.len() < PARALLEL_THRESHOLD {
+                for seq in unpaired {
+                    self.complete_cocycle(k, row, seq);
                 }
-                self.complete_cocycle(k, row, seq);
+                continue;
+            }
+
+            // ── Parallel propose ────────────────────────────────────────
+            // Borrow the read-set immutably; share via std::thread::scope
+            // so we don't have to clone HashMaps.  Workers pull tasks from
+            // a shared atomic index; each writes its outcome to a Vec slot
+            // pre-sized to `unpaired.len()`.  No locks on the hot path.
+            //
+            // Note: `snap` and `next` MUST be declared outside the scope's
+            // closure body — the borrow checker requires their lifetime to
+            // outlive `'scope`, which the closure's locals don't satisfy.
+            let n_tasks = unpaired.len();
+            let n_threads = n_workers.min(n_tasks).max(1);
+            let snap = Snapshot::from_table(self);
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let outcomes: Vec<Outcome> = {
+                let snap_ref = &snap;
+                let tasks_ref = &unpaired;
+                let next_ref = &next;
+                std::thread::scope(|s| {
+                    let handles: Vec<_> = (0..n_threads)
+                        .map(|_| {
+                            s.spawn(move || {
+                                use std::sync::atomic::Ordering::Relaxed;
+                                let mut local: Vec<(usize, Outcome)> = Vec::new();
+                                loop {
+                                    let i = next_ref.fetch_add(1, Relaxed);
+                                    if i >= tasks_ref.len() { break; }
+                                    let seq = tasks_ref[i].clone();
+                                    let out = propose_cocycle(snap_ref, k, row, seq);
+                                    local.push((i, out));
+                                }
+                                local
+                            })
+                        })
+                        .collect();
+
+                    let mut slots: Vec<Option<Outcome>> = (0..n_tasks).map(|_| None).collect();
+                    for h in handles {
+                        for (i, out) in h.join().unwrap() {
+                            slots[i] = Some(out);
+                        }
+                    }
+                    slots.into_iter().map(|o| o.expect("every task should produce an outcome")).collect()
+                })
+            };
+            drop(snap);  // explicit: end the immutable borrow of self before mutating below.
+
+            // ── Serial commit, in row order ─────────────────────────────
+            // Each commit may invalidate later proposals: a Diff outcome
+            // claims its target, so a later sibling that proposed the same
+            // target needs a re-propose; a NoDiff with `last_leading=Some(L)`
+            // is invalidated only if some tail of L is newly in `target_set`.
+            for outcome in outcomes {
+                self.commit_outcome(k, row, outcome);
+            }
+        }
+    }
+
+    /// Commit a single proposal back to the live table, redoing it serially
+    /// against current state if a sibling commit invalidated it.
+    fn commit_outcome(&mut self, stem: usize, row: usize, outcome: Outcome) {
+        match outcome {
+            Outcome::Diff { src, tgt, tgt_row } => {
+                if self.is_source(&src) || self.is_target(&src) {
+                    // src already paired by some earlier commit (shouldn't
+                    // normally happen — src was unpaired at row start —
+                    // but cheap to guard).
+                    return;
+                }
+                if self.is_target(&tgt) || self.is_source(&tgt) {
+                    // Target was claimed by an earlier sibling commit.
+                    // Re-run propose against current state.
+                    self.complete_cocycle(stem, row, src);
+                    return;
+                }
+                self.record_differential(stem, row, src, tgt_row, tgt);
+            }
+            Outcome::Artifact { src, tgt } => {
+                if self.is_source(&src) || self.is_target(&src) { return; }
+                if self.is_target(&tgt) || self.is_source(&tgt) {
+                    self.complete_cocycle(stem, row, src);
+                    return;
+                }
+                // Synthetic tgt_row=0 — see complete_cocycle for rationale.
+                self.record_differential(stem, row, src, 0, tgt);
+            }
+            Outcome::NoDiff { src, last_leading } => {
+                if self.is_source(&src) || self.is_target(&src) { return; }
+                if let Some(l) = last_leading {
+                    // Was the "no tail found" decision invalidated by a
+                    // sibling commit that added a new tail-target?  Cheap
+                    // O(L) check against current `target_set`.  If yes,
+                    // re-propose against current state.
+                    let now_has = (0..l.len()).any(|ell| self.target_set.contains_key(&l[ell..]));
+                    if now_has {
+                        self.complete_cocycle(stem, row, src);
+                    }
+                }
+                // last_leading=None: stable (boundary went to zero) — no-op.
             }
         }
     }
@@ -236,120 +481,31 @@ impl CurtisTable {
     /// - If the leading term y of d(x) is in the table and free, record x → y.
     /// - Otherwise, find a tail of y that's already a differential target,
     ///   splice in the source, and recurse with the full adjusted element.
+    ///
+    /// The loop body lives in `propose_cocycle` (pure, snapshot-based).
+    /// `complete_cocycle` just runs propose against current state and
+    /// commits the outcome — no conflict detection needed since it's
+    /// the single-threaded path used by `compute_partial` and by the
+    /// commit-time fallback in `compute_differentials`.
     fn complete_cocycle(&mut self, stem: usize, row: usize, seq: Vec<usize>) {
-        let original = seq.clone();
-        // Track the full (multi-term) element *and* its boundary.  We maintain
-        // the boundary incrementally: since d is F₂-linear,
-        //     d(x + patch) = d(x) + d(patch)
-        // so after a patch we only need to diff the (small) patch and merge
-        // into `current_boundary`, instead of re-diffing the whole (growing)
-        // current_elem every iteration.  For high-stem entries the elem can
-        // accumulate thousands of monomials — the naive recompute is the
-        // loop's hot spot.
-        let mut current_elem = seq_to_element(&seq);
-        let mut current_boundary = current_elem.diff_ref();
-
-        // Safety cap.  The loop terminates naturally: each iteration either
-        // returns (d(x)=0, leading is free and we record, no tail matches so
-        // x is a cycle, or patch zeroed x) or the leading monomial strictly
-        // decreases in lex order.  There are finitely many admissible
-        // monomials at a given stem, so iteration is bounded.  The cap is a
-        // bug-guard: if we ever regress and leading stops decreasing, fail
-        // loudly instead of spinning forever.
-        //
-        // Historical note: this was 200, which silently cut off high-stem
-        // high-filtration completions (e.g. 27-stem row 9, which legitimately
-        // takes ~750 steps to patch down to row 2).  Those entries were
-        // stranded as fake survivors, cascading into spurious entries and
-        // missing differentials at stems ≥ 27.
-        let mut prev_leading: Option<Vec<usize>> = None;
-        const SAFETY_CAP: usize = 100_000;
-        for _guard in 0..SAFETY_CAP {
-            if current_boundary.0.is_empty() {
-                return; // d(x) = 0, permanent cycle candidate
+        let outcome = {
+            let snap = Snapshot::from_table(self);
+            propose_cocycle(&snap, stem, row, seq)
+        };
+        match outcome {
+            Outcome::Diff { src, tgt, tgt_row } => {
+                self.record_differential(stem, row, src, tgt_row, tgt);
             }
-
-            // Leading term = highest-filtration monomial (largest first generator).
-            let leading = filtration_leading(&current_boundary);
-
-            // Termination invariant: if we patched last iteration, the new
-            // leading must be strictly less (in lex) than the previous one.
-            // If not, we'd spin forever.
-            if let Some(prev) = &prev_leading {
-                debug_assert!(
-                    leading.as_slice() < prev.as_slice(),
-                    "complete_cocycle regression: leading {:?} did not strictly decrease below {:?} (stem {}, row {}, original {:?})",
-                    leading, prev, stem, row, original
-                );
+            Outcome::Artifact { src, tgt } => {
+                // Synthetic tgt_row=0: artifact entries aren't stored in
+                // `entries`, and emit_json / the Python visualizer filter
+                // artifact differentials out via `is_zero_tail_artifact`.
+                self.record_differential(stem, row, src, 0, tgt);
             }
-            prev_leading = Some(leading.clone());
-
-            // Artifact leading term: we deliberately don't store artifact
-            // entries in the table (they used to cost 99.9% of the storage
-            // with no effect on the published output).  But the algorithm's
-            // bookkeeping still needs the source/target pairing to be sound:
-            // without it, `x` would be stranded as a fake survivor, and —
-            // worse — later stems would multiply that fake survivor by λ_{n-1}
-            // and cascade into a survivor explosion.  So record a "virtual"
-            // differential: mark both source and target as paired in the
-            // set-maps, skip inserting the target into `entries`.  `tgt_row`
-            // is stored for emit_json round-trip, but emit_json filters these
-            // out anyway via `is_zero_tail_artifact(&d.target)`.
-            if is_zero_tail_artifact(&leading) {
-                if !self.is_target(&leading) && !self.is_source(&leading) {
-                    // Synthetic tgt_row: we don't actually have a row for
-                    // artifact entries since we never inserted them.  0 is
-                    // fine — this field only feeds the JSON round-trip, and
-                    // both emit_json and the Python visualizer filter
-                    // artifact differentials out.
-                    self.record_differential(stem, row, original, 0, leading);
-                    return;
-                }
-                // If the artifact target is already paired (as someone's
-                // source or target), we fall through into the tail-search
-                // branch below — same as a non-artifact "not free" case.
-            } else if self.is_in_table(&leading) && !self.is_target(&leading) && !self.is_source(&leading) {
-                let tgt_row = self.row_of(&leading).unwrap();
-                self.record_differential(stem, row, original, tgt_row, leading);
-                return;
-            }
-
-            // Otherwise: "complete the cocycle."
-            // Find a (possibly full) tail of `leading` that is already the
-            // target of some differential, and adjust the element to cancel
-            // that term.  `ell=0` = the leading itself is a target — in that
-            // case the patch is just `z` with an empty prefix.
-            let mut found = false;
-            for ell in 0..leading.len() {
-                let tail = &leading[ell..];
-                if self.target_set.contains_key(tail) {
-                    // `tail` is hit by `z` under some differential.
-                    let z = self.find_source_of_target(tail).unwrap();
-                    // x ← x + prefix · z  (cancels the leading·tail component).
-                    // Update boundary incrementally: d(x + p) = d(x) + d(p).
-                    let prefix = &leading[..ell];
-                    let prefix_elem = seq_to_element(prefix);
-                    let z_elem = seq_to_element(&z);
-                    let patch = prefix_elem * z_elem;
-                    let patch_boundary = patch.diff_ref();
-
-                    current_elem = current_elem + patch;
-                    current_boundary = current_boundary + patch_boundary;
-
-                    if current_elem.0.is_empty() {
-                        // x became zero — it was a boundary all along
-                        return;
-                    }
-                    found = true;
-                    break;
-                }
-            }
-
-            if !found {
-                // No tail found — leading term is not in table, and no sub-tail
-                // is a differential target.  This can happen when the boundary
-                // lives entirely outside the truncation.  x is a cycle.
-                return;
+            Outcome::NoDiff { .. } => {
+                // x was a cycle (d(x)=0 or boundary-all-along) or its
+                // leading had no tail-target in the table.  Either way,
+                // no diff to record — the entry stays as a survivor.
             }
         }
     }
