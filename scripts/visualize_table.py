@@ -9,9 +9,10 @@ Expects the JSON format emitted by `cargo run --bin table -- --json`.
 Writes a PNG (or any format matplotlib supports, inferred from extension).
 
 Layout: x-axis = stem (t-s), y-axis = filtration (n).  Each entry is a
-dot; multiple entries in the same bidegree stack with a small x-offset
-and are labelled with their admissible sequence.  Differentials are
-vertical arrows within a column (they preserve stem and lower filtration).
+dot; multiple entries in the same bidegree stack vertically inside the
+cell, ordered by admissible-sequence length with the shortest monomials
+at the visual bottom of the cell (matches the Adams spectral sequence
+convention).  Differentials are straight, headless gray lines.
 """
 
 from __future__ import annotations
@@ -71,38 +72,35 @@ def main():
     # Map each entry to a plot (x, y) position so arrows find the right dots.
     # Points sit INSIDE cells (not at grid intersections): stem k cell spans
     # x ∈ [k, k+1] with center x = k + 0.5; filtration row n cell spans
-    # y ∈ [n-1, n] with center y = n - 0.5.  Entries in the same bidegree
-    # cluster organically around the cell center via sunflower / golden-
-    # angle phyllotaxis — the radius grows as √i so area density stays
-    # uniform, and the total spread saturates well before the cell edge.
-    import math
-
-    GOLDEN = math.pi * (3 - math.sqrt(5))  # ≈ 137.5° in radians
+    # y ∈ [n-1, n] with center y = n - 0.5.
+    #
+    # Arrangement within a cell: linear vertical stack, ordered by monomial
+    # length so the shortest sequences sit at the visual bottom of the cell
+    # (matches the Adams SS convention).  Recall the y-axis is inverted
+    # (`set_ylim(max_row, 0)`), so "visual bottom" corresponds to a *larger*
+    # data y inside the cell's [row-1, row] interval.
 
     pos = {}  # (stem, row, tuple(seq)) -> (x, y)
+    CELL_MARGIN = 0.15  # padding from the cell edges
     for (stem, row), bucket in by_cell.items():
-        bucket.sort(key=lambda e: e["seq"])
+        # Primary key: sequence length ascending (shortest = index 0 = bottom).
+        # Secondary: lex on the sequence itself, for deterministic ordering
+        # among same-length monomials.
+        bucket.sort(key=lambda e: (len(e["seq"]), e["seq"]))
         n = len(bucket)
         cx = stem + 0.5
         cy = row - 0.5
         if n == 1:
-            for e in bucket:
-                pos[(stem, row, tuple(e["seq"]))] = (cx, cy)
+            pos[(stem, row, tuple(bucket[0]["seq"]))] = (cx, cy)
             continue
-        # Spread saturates as the cell fills:
-        #   n=2  → ~0.18    (just off-center)
-        #   n=4  → ~0.25
-        #   n=16 → ~0.40
-        #   n→∞  → 0.50     (cell boundary)
-        spread = 0.50 * (1.0 - 1.0 / (1.0 + 0.35 * n))
+        # Map index 0 → visual bottom = data y = row - margin.
+        # Map index n-1 → visual top = data y = row - 1 + margin.
+        y_bot = row - CELL_MARGIN          # larger data y, visually lower
+        y_top = (row - 1) + CELL_MARGIN    # smaller data y, visually higher
         for i, e in enumerate(bucket):
-            # Offset by 0.5 so no point lands exactly at the center (which
-            # would look out of place when other siblings are orbiting it).
-            r = spread * math.sqrt((i + 0.5) / n)
-            theta = i * GOLDEN
-            x = cx + r * math.cos(theta)
-            y = cy + r * math.sin(theta)
-            pos[(stem, row, tuple(e["seq"]))] = (x, y)
+            t = i / (n - 1)  # 0 (shortest) .. 1 (longest)
+            y = y_bot + t * (y_top - y_bot)
+            pos[(stem, row, tuple(e["seq"]))] = (cx, y)
 
     # Figure: scale width with max_stem, height with max row observed.
     max_row = max((r for _, r in (k[:2] for k in ((e["stem"], e["row"]) for e in entries))), default=1)
@@ -110,28 +108,30 @@ def main():
     fig_h = max(6, 0.55 * max_row)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # Plot dots + labels.
+    # Plot dots + labels.  Labels sit just to the right of each dot, vertically
+    # centered against it — with vertical stacking, this keeps each label on
+    # its own row (instead of climbing diagonally and colliding with neighbours).
     for e in entries:
         x, y = pos[(e["stem"], e["row"], tuple(e["seq"]))]
         color = ROLE_COLOR.get(e["role"], "#444")
-        ax.plot(x, y, "o", color=color, markersize=7, zorder=3)
+        ax.plot(x, y, "o", color=color, markersize=5, zorder=3)
         label = format_seq(e["seq"])
         ax.annotate(
             label,
             (x, y),
-            xytext=(4, 4),
+            xytext=(5, 0),
             textcoords="offset points",
-            fontsize=6,
+            fontsize=5.5,
             color="#333",
             zorder=4,
-            alpha=0.85,
+            alpha=0.9,
+            va="center",
         )
 
-    # Differentials: curved arrow from source → target.  In the lambda
-    # algebra, d lowers total degree by 1 (source stem = sum(src_seq),
-    # target stem = sum(tgt_seq) = src_stem - 1) and also lowers filtration.
-    # So arrows are generally diagonal (left + down), not vertical.
-    for i, d in enumerate(diffs):
+    # Differentials: straight, headless lines from source → target.  The
+    # density at high stems makes arrowheads + curves illegible; a thin
+    # gray segment is enough to pair source with target by eye.
+    for d in diffs:
         src_stem = sum(d["src"])
         tgt_stem = sum(d["tgt"])
         sk = (src_stem, d["src_row"], tuple(d["src"]))
@@ -140,20 +140,12 @@ def main():
             continue
         x1, y1 = pos[sk]
         x2, y2 = pos[tk]
-        rad = 0.18 if (i % 2 == 0) else -0.18
-        ax.annotate(
-            "",
-            xy=(x2, y2),
-            xytext=(x1, y1),
-            arrowprops=dict(
-                arrowstyle="->,head_width=0.35,head_length=0.6",
-                color="#C8C6C7",
-                alpha=0.7,
-                lw=1.3,
-                shrinkA=6,
-                shrinkB=6,
-                connectionstyle=f"arc3,rad={rad}",
-            ),
+        ax.plot(
+            [x1, x2], [y1, y2],
+            color="#9A9A9A",
+            alpha=0.55,
+            linewidth=0.7,
+            solid_capstyle="round",
             zorder=2,
         )
 
