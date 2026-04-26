@@ -84,7 +84,8 @@ Examples:
 ```sh
 cargo run --release --bin table 12 --ascii -o report.txt
 cargo run --release --bin table 12 --json  -o report.json
-python3 scripts/visualize_table.py report.json curtis.png
+python3 scripts/visualize_classes.py report.json curtis_classes.png
+python3 scripts/visualize_density.py report.json curtis_density.png
 
 # Incrementally extend a saved state:
 cargo run --release --bin table 24 --json -o state24.json
@@ -95,16 +96,30 @@ cargo run --release --bin table 26 --from state24.json --json -o state26.json
 cargo run --release --bin table 30 --checkpoint-dir ckpt --json -o state30.json
 ```
 
-### `visualize_table.py` — bidegree chart
+### `visualize_classes.py` — labeled bidegree chart
 
 ```sh
-python3 scripts/visualize_table.py report.json [output.png]
+python3 scripts/visualize_classes.py report.json [output.png]
 ```
 
-Reads the JSON emitted by `table --json` and renders the Curtis table as
-a bidegree chart: stem on the x-axis, filtration on the y-axis; entries
-are colored by role (cycle / source / target); differentials are drawn
-as red arrows from source to target.  Requires `matplotlib`.
+Reads the JSON emitted by `table --json` and renders the Curtis table
+class-by-class: stem on the x-axis, filtration on the y-axis; each
+admissible monomial is a labeled colored dot (cycle / source / target);
+differentials are straight gray lines from source to target.  Cells
+stretch vertically (driven by the densest cell on the row) and
+horizontally (driven by the longest label in the column) so the labels
+stay legible at high stems.  Requires `matplotlib`.
+
+### `visualize_density.py` — density chart
+
+```sh
+python3 scripts/visualize_density.py report.json [output.png]
+```
+
+Same data, opposite emphasis: a uniform 1×1 bidegree grid with no
+labels, dots arranged in a golden-angle phyllotaxis spiral inside each
+cell.  Tells you about *density and connections* rather than which
+specific class lives where.  Requires `matplotlib`.
 
 ### `check_diff` — correctness test bench; not for public use
 
@@ -116,7 +131,8 @@ as red arrows from source to target.  Requires `matplotlib`.
 - `src/bin/table.rs` — `table` binary (flags + file output)
 - `src/bin/check_diff.rs` — correctness test bench
 - `scripts/check_driver.py` — wire-format shim around `lambda.py` for ground truth
-- `scripts/visualize_table.py` — matplotlib bidegree chart from JSON
+- `scripts/visualize_classes.py` — labeled matplotlib bidegree chart from JSON
+- `scripts/visualize_density.py` — unlabeled phyllotaxis density chart from JSON
 - `lambda.py` — Python reference implementation of the differential
 
 ## References
