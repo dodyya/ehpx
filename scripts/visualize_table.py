@@ -71,41 +71,78 @@ def main():
 
     # Map each entry to a plot (x, y) position so arrows find the right dots.
     # Points sit INSIDE cells (not at grid intersections): stem k cell spans
-    # x ∈ [k, k+1] with center x = k + 0.5; filtration row n cell spans
-    # y ∈ [n-1, n] with center y = n - 0.5.
+    # x ∈ [k, k+1] with center x = k + 0.5.
     #
-    # Arrangement within a cell: linear vertical stack, ordered by monomial
+    # Vertical layout: rows are *not* uniform height.  Each row's height is
+    # set by the densest cell on that row — a row whose busiest cell has 18
+    # entries is given enough y-space that those 18 dots + labels don't pile
+    # on top of each other.  Sparse rows stay compact.  This is much more
+    # space-efficient than expanding every row globally to fit the worst case.
+    #
+    # Within a cell, entries stack linearly along y, sorted by monomial
     # length so the shortest sequences sit at the visual bottom of the cell
     # (matches the Adams SS convention).  Recall the y-axis is inverted
-    # (`set_ylim(max_row, 0)`), so "visual bottom" corresponds to a *larger*
-    # data y inside the cell's [row-1, row] interval.
+    # (`set_ylim(total_h, 0)`), so "visual bottom" = *larger* data y.
+
+    CELL_MARGIN = 0.15      # padding from cell edges (data-y units)
+    PER_ENTRY = 0.28        # extra row height per entry beyond the first
+    MIN_ROW_HEIGHT = 1.0    # baseline row height for sparse rows
+
+    # How tall does each row need to be?  Driven by the densest cell on it.
+    row_max_count = defaultdict(int)
+    for (s, r), bucket in by_cell.items():
+        if len(bucket) > row_max_count[r]:
+            row_max_count[r] = len(bucket)
+    max_row = max((r for _, r in by_cell.keys()), default=1)
+
+    def row_height(r):
+        n = row_max_count.get(r, 0)
+        needed = 2 * CELL_MARGIN + max(0, n - 1) * PER_ENTRY
+        return max(MIN_ROW_HEIGHT, needed)
+
+    # Lay rows out top-to-bottom with cumulative offsets.  `row_top[r]` is
+    # the smaller data-y boundary of row r's cell band; `row_bot[r]` is the
+    # larger.  Row 1 starts at y=0.
+    row_top: dict[int, float] = {}
+    row_bot: dict[int, float] = {}
+    y_cursor = 0.0
+    for r in range(1, max_row + 1):
+        row_top[r] = y_cursor
+        y_cursor += row_height(r)
+        row_bot[r] = y_cursor
+    total_h = y_cursor
+
+    # Dots sit near the LEFT edge of each cell (not the center) so the
+    # right-of-dot label has the full remaining cell width to extend into
+    # before bumping the next column's content.
+    DOT_X_OFFSET = 0.10  # data-x units from left edge of the cell
 
     pos = {}  # (stem, row, tuple(seq)) -> (x, y)
-    CELL_MARGIN = 0.15  # padding from the cell edges
     for (stem, row), bucket in by_cell.items():
         # Primary key: sequence length ascending (shortest = index 0 = bottom).
         # Secondary: lex on the sequence itself, for deterministic ordering
         # among same-length monomials.
         bucket.sort(key=lambda e: (len(e["seq"]), e["seq"]))
         n = len(bucket)
-        cx = stem + 0.5
-        cy = row - 0.5
+        cx = stem + DOT_X_OFFSET
+        cy_top = row_top[row]
+        cy_bot = row_bot[row]
         if n == 1:
-            pos[(stem, row, tuple(bucket[0]["seq"]))] = (cx, cy)
+            pos[(stem, row, tuple(bucket[0]["seq"]))] = (cx, (cy_top + cy_bot) / 2)
             continue
-        # Map index 0 → visual bottom = data y = row - margin.
-        # Map index n-1 → visual top = data y = row - 1 + margin.
-        y_bot = row - CELL_MARGIN          # larger data y, visually lower
-        y_top = (row - 1) + CELL_MARGIN    # smaller data y, visually higher
+        # Map index 0 → visual bottom (larger data y); index n-1 → visual top.
+        y_bot = cy_bot - CELL_MARGIN
+        y_top = cy_top + CELL_MARGIN
         for i, e in enumerate(bucket):
             t = i / (n - 1)  # 0 (shortest) .. 1 (longest)
             y = y_bot + t * (y_top - y_bot)
             pos[(stem, row, tuple(e["seq"]))] = (cx, y)
 
-    # Figure: scale width with max_stem, height with max row observed.
-    max_row = max((r for _, r in (k[:2] for k in ((e["stem"], e["row"]) for e in entries))), default=1)
+    # Figure: width scales with stems; height scales with the *total* y
+    # span (sum of variable row heights) so dense rows render at a usable
+    # vertical resolution without bloating sparse ones.
     fig_w = max(10, 1.0 * (max_stem + 1))
-    fig_h = max(6, 0.55 * max_row)
+    fig_h = max(6, 0.55 * total_h)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
     # Plot dots + labels.  Labels sit just to the right of each dot, vertically
@@ -156,21 +193,23 @@ def main():
     ax.set_ylabel("filtration  n")
     ax.set_title(f"Curtis table through stem {max_stem}")
 
-    # Major ticks: labels at cell centers.
+    # Major ticks: row labels at the center of each variable-height row.
     ax.set_xticks([k + 0.5 for k in range(max_stem + 1)])
     ax.set_xticklabels([str(k) for k in range(max_stem + 1)])
-    ax.set_yticks([r - 0.5 for r in range(1, max_row + 1)])
+    ax.set_yticks([(row_top[r] + row_bot[r]) / 2 for r in range(1, max_row + 1)])
     ax.set_yticklabels([str(r) for r in range(1, max_row + 1)])
     ax.tick_params(which="major", length=0)  # hide major tick marks
 
-    # Minor ticks: cell-boundary gridlines.
+    # Minor ticks: cell-boundary gridlines.  Y boundaries follow the
+    # variable row layout; X boundaries stay at integer stem values.
     ax.set_xticks(range(0, max_stem + 2), minor=True)
-    ax.set_yticks(range(0, max_row + 2), minor=True)
+    y_boundaries = [row_top[1]] + [row_bot[r] for r in range(1, max_row + 1)]
+    ax.set_yticks(y_boundaries, minor=True)
     ax.tick_params(which="minor", length=0)
 
     ax.set_xlim(0, max_stem + 1)
     # CS chart convention: filtration increases downward (row 1 on top).
-    ax.set_ylim(max_row, 0)
+    ax.set_ylim(total_h, 0)
     ax.grid(which="minor", alpha=0.35, linewidth=0.6)
     ax.grid(which="major", alpha=0)
     ax.set_axisbelow(True)
@@ -184,7 +223,7 @@ def main():
     ax.legend(handles=handles, loc="upper left", fontsize=8, framealpha=0.9)
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=160)
+    fig.savefig(out_path, dpi=120)
     print(f"wrote {out_path}", file=sys.stderr)
 
 
