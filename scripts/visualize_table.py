@@ -114,8 +114,34 @@ def main():
 
     # Dots sit near the LEFT edge of each cell (not the center) so the
     # right-of-dot label has the full remaining cell width to extend into
-    # before bumping the next column's content.
-    DOT_X_OFFSET = 0.10  # data-x units from left edge of the cell
+    # before bumping the next column's content.  Columns themselves
+    # stretch horizontally to fit the longest label in that stem — a
+    # column whose busiest entry is `λ(2,4,1,1,1,3,3,3)` is wider than
+    # one whose worst case is `λ(0)`, so labels stay inside their cell.
+    DOT_X_OFFSET = 0.10        # data-x from left edge of the cell to the dot
+    PER_CHAR = 0.045           # data-x per character of the longest label
+    LABEL_PADDING = 0.10       # extra space after the label (to next col)
+    MIN_COL_WIDTH = 1.0        # baseline column width for short-label stems
+
+    col_max_chars = defaultdict(int)
+    for e in entries:
+        chars = len(format_seq(e["seq"]))
+        if chars > col_max_chars[e["stem"]]:
+            col_max_chars[e["stem"]] = chars
+
+    def col_width(k):
+        chars = col_max_chars.get(k, 0)
+        needed = DOT_X_OFFSET + chars * PER_CHAR + LABEL_PADDING
+        return max(MIN_COL_WIDTH, needed)
+
+    col_left: dict[int, float] = {}
+    col_right: dict[int, float] = {}
+    x_cursor = 0.0
+    for k in range(max_stem + 1):
+        col_left[k] = x_cursor
+        x_cursor += col_width(k)
+        col_right[k] = x_cursor
+    total_w = x_cursor
 
     pos = {}  # (stem, row, tuple(seq)) -> (x, y)
     for (stem, row), bucket in by_cell.items():
@@ -124,24 +150,25 @@ def main():
         # among same-length monomials.
         bucket.sort(key=lambda e: (len(e["seq"]), e["seq"]))
         n = len(bucket)
-        cx = stem + DOT_X_OFFSET
-        cy_top = row_top[row]
-        cy_bot = row_bot[row]
-        if n == 1:
-            pos[(stem, row, tuple(bucket[0]["seq"]))] = (cx, (cy_top + cy_bot) / 2)
-            continue
-        # Map index 0 → visual bottom (larger data y); index n-1 → visual top.
-        y_bot = cy_bot - CELL_MARGIN
-        y_top = cy_top + CELL_MARGIN
+        cx = col_left[stem] + DOT_X_OFFSET
+        cy_mid = (row_top[row] + row_bot[row]) / 2
+        # Stack the entries with CONSTANT spacing (= PER_ENTRY data-y) and
+        # center the whole stack vertically inside the cell.  A 3-entry
+        # stack stays compact near the middle of the cell; the densest
+        # cell on this row is exactly the size that drove `row_height`,
+        # so it just fills the row's interior margin.  The Adams SS
+        # convention (shortest at the visual bottom) means index 0 sits
+        # at the larger data-y end of the stack.
+        stack_h = (n - 1) * PER_ENTRY
+        y_bottom_of_stack = cy_mid + stack_h / 2  # visually lower (larger y)
         for i, e in enumerate(bucket):
-            t = i / (n - 1)  # 0 (shortest) .. 1 (longest)
-            y = y_bot + t * (y_top - y_bot)
+            y = y_bottom_of_stack - i * PER_ENTRY
             pos[(stem, row, tuple(e["seq"]))] = (cx, y)
 
-    # Figure: width scales with stems; height scales with the *total* y
-    # span (sum of variable row heights) so dense rows render at a usable
-    # vertical resolution without bloating sparse ones.
-    fig_w = max(10, 1.0 * (max_stem + 1))
+    # Figure: width and height both scale with the *total* data span (sum
+    # of variable col widths / row heights) so dense cells get the inches
+    # they need without bloating sparse ones.
+    fig_w = max(10, 1.0 * total_w)
     fig_h = max(6, 0.55 * total_h)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
@@ -193,21 +220,23 @@ def main():
     ax.set_ylabel("filtration  n")
     ax.set_title(f"Curtis table through stem {max_stem}")
 
-    # Major ticks: row labels at the center of each variable-height row.
-    ax.set_xticks([k + 0.5 for k in range(max_stem + 1)])
+    # Major ticks: stem/row labels at the center of each variable cell.
+    ax.set_xticks([(col_left[k] + col_right[k]) / 2 for k in range(max_stem + 1)])
     ax.set_xticklabels([str(k) for k in range(max_stem + 1)])
     ax.set_yticks([(row_top[r] + row_bot[r]) / 2 for r in range(1, max_row + 1)])
     ax.set_yticklabels([str(r) for r in range(1, max_row + 1)])
     ax.tick_params(which="major", length=0)  # hide major tick marks
 
-    # Minor ticks: cell-boundary gridlines.  Y boundaries follow the
-    # variable row layout; X boundaries stay at integer stem values.
-    ax.set_xticks(range(0, max_stem + 2), minor=True)
+    # Minor ticks: cell-boundary gridlines.  Both axes follow the
+    # variable cell layout (column widths driven by longest label,
+    # row heights by densest cell).
+    x_boundaries = [col_left[0]] + [col_right[k] for k in range(max_stem + 1)]
+    ax.set_xticks(x_boundaries, minor=True)
     y_boundaries = [row_top[1]] + [row_bot[r] for r in range(1, max_row + 1)]
     ax.set_yticks(y_boundaries, minor=True)
     ax.tick_params(which="minor", length=0)
 
-    ax.set_xlim(0, max_stem + 1)
+    ax.set_xlim(0, total_w)
     # CS chart convention: filtration increases downward (row 1 on top).
     ax.set_ylim(total_h, 0)
     ax.grid(which="minor", alpha=0.35, linewidth=0.6)
