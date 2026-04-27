@@ -9,7 +9,7 @@ Usage:
 Expects the JSON format emitted by `cargo run --bin table -- --json`.
 Writes a PNG (or any format matplotlib supports, inferred from extension).
 
-Layout: x-axis = stem (t-s), y-axis = filtration (n).  Each (stem, row)
+Layout: x-axis = degree, y-axis = filtration (n).  Each (degree, row)
 cell is a uniform 1×1 box (no horizontal or vertical stretching) — the
 goal is for *density and connections* to be the visual story, not
 class identity.  Within a cell, entries are arranged in a sunflower /
@@ -67,7 +67,7 @@ def main():
     max_row = max((r for _, r in by_cell.keys()), default=1)
 
     # Sunflower / phyllotaxis layout within each cell.  Cells are uniform
-    # 1×1 boxes; cell (stem, row) has center (stem + 0.5, row - 0.5).
+    # 1×1 boxes; cell (degree, row) has center (degree + 0.5, row - 0.5).
     # Radius grows as √i (constant area density), angle increments by the
     # golden angle so dots distribute without obvious lattice artefacts.
     GOLDEN = math.pi * (3 - math.sqrt(5))   # ≈ 137.5°
@@ -97,7 +97,7 @@ def main():
             pos[(stem, row, tuple(e["seq"]))] = (x, y)
 
     # Figure: uniform cell size, so width and height are simple linear
-    # functions of stem count and max row.  Bigger inches-per-cell here
+    # functions of degree count and max row.  Bigger inches-per-cell here
     # than in `visualize_classes.py` doesn't help — cells stay 1×1, so
     # we just want enough resolution to distinguish individual dots.
     INCHES_PER_CELL = 0.35
@@ -105,7 +105,7 @@ def main():
     fig_h = max(5, INCHES_PER_CELL * max_row)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # Plot dots — small enough to make density legible at high stems
+    # Plot dots — small enough to make density legible at high degrees
     # where cells get crowded, opaque enough to read individually in
     # sparse cells.
     for e in entries:
@@ -135,9 +135,9 @@ def main():
 
     # Axes + grid.  Major ticks label the cell centers; minor ticks at
     # integer boundaries draw the cell edges.
-    ax.set_xlabel("stem  (t − s)")
+    ax.set_xlabel("degree")
     ax.set_ylabel("filtration  n")
-    ax.set_title(f"Curtis table density through stem {max_stem}")
+    ax.set_title(f"Curtis table density through degree {max_stem}")
 
     ax.set_xticks([k + 0.5 for k in range(max_stem + 1)])
     ax.set_xticklabels([str(k) for k in range(max_stem + 1)], fontsize=7)

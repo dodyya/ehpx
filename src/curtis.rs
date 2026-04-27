@@ -1,10 +1,10 @@
 // ── Curtis algorithm ─────────────────────────────────────────────────────────
 //
 // Implements the Curtis algorithm for computing H*(Λ) via the EHP spectral
-// sequence.  Two phases per stem k:
+// sequence.  Two phases per degree k:
 //
 //   Phase 1 — populate column k of the Curtis table from previously computed
-//             stems (all rows n ≥ 3; row 2 is deferred).
+//             degrees (all rows n ≥ 3; row 2 is deferred).
 //   Phase 2 — compute differentials out of column k by "completing the cocycle."
 //             Then fill row 2 using the differentials just found.
 //
@@ -16,14 +16,16 @@ use smallvec::smallvec;
 
 // ── Table types ──────────────────────────────────────────────────────────────
 
-/// A single entry in the Curtis table, living in row `n`, column `stem`.
+/// A single entry in the Curtis table, living in row `n`, column `stem` (= total degree).
 #[derive(Clone, Debug)]
 pub struct Entry {
     /// The element, stored as its admissible sequence.
     pub seq: Vec<usize>,
     /// Row (filtration) n.
     pub row: usize,
-    /// Column (stem) t-s = k.
+    /// Column = total degree k of the monomial.  Field name is kept as
+    /// `stem` for state-file compatibility — old checkpoints serialize
+    /// it under that key, and renaming would invalidate every saved JSON.
     pub stem: usize,
 }
 
@@ -167,20 +169,21 @@ fn propose_cocycle(snap: &Snapshot<'_>, stem: usize, row: usize, seq: Vec<usize>
 /// The full Curtis table.
 #[derive(Debug)]
 pub struct CurtisTable {
-    /// entries[stem][row] = list of admissible sequences
+    /// entries[degree][row] = list of admissible sequences
     pub entries: BTreeMap<usize, BTreeMap<usize, Vec<Vec<usize>>>>,
-    /// differentials[stem] = list of differentials originating in that stem
+    /// differentials[degree] = list of differentials originating in that degree
     pub differentials: BTreeMap<usize, Vec<Differential>>,
     /// Quick lookup: sequence → true if it is the *target* of some differential
-    target_set: HashMap<Vec<usize>, (usize, usize)>,  // seq → (stem, source_row)
+    target_set: HashMap<Vec<usize>, (usize, usize)>,  // seq → (degree, source_row)
     /// Quick lookup: sequence → true if it is the *source* of some differential
     source_set: HashMap<Vec<usize>, Vec<usize>>,  // source_seq → target_seq
     /// Reverse index: target_seq → source_seq.  Needed by `complete_cocycle`
     /// to patch via `prefix · z` where z is the source hitting the matched
     /// tail.  Without this, the lookup is a linear scan over `source_set`
-    /// — hot path, and `source_set` grows quadratically with stems.
+    /// — hot path, and `source_set` grows quadratically with degree.
     target_to_source: HashMap<Vec<usize>, Vec<usize>>,
-    /// Maximum stem computed so far.
+    /// Maximum degree computed so far.  Field name kept as `max_stem`
+    /// for state-file compatibility.
     pub max_stem: usize,
 }
 
@@ -285,7 +288,7 @@ impl CurtisTable {
     // ── Phase 1: populate column k ──────────────────────────────────────────
 
     fn populate_column(&mut self, k: usize, _max_stem: usize) {
-        // Row 1: stem k portion of Λ(1).
+        // Row 1: degree-k portion of Λ(1).
         // Λ(1) is spanned by admissible monomials whose first generator is ≤ 0,
         // i.e. the unit and λ_0^p for all p ≥ 1.
         //
@@ -293,7 +296,7 @@ impl CurtisTable {
         // pure bookkeeping that never shows up in the published output
         // and (empirically verified against the pre-optimization oracle)
         // doesn't affect non-artifact cocycle completion either.  Keeping
-        // them would blow up later stems' work via the survivor cascade
+        // them would blow up later degrees' work via the survivor cascade
         // (`λ_{n-1} · λ_0^p → λ_{n-1,0^p}`, each another artifact…).  So
         // we only insert the unit and λ_0 here, and filter artifacts out
         // of every product below.  `_max_stem` is kept in the signature
@@ -341,12 +344,12 @@ impl CurtisTable {
 
         // Spawn-per-task threshold.  Below this, parallel-propose's
         // overhead (thread spawn, snapshot capture, commit re-checks) is
-        // bigger than the saved work.  Profiled: low stems ≤ 30 spend
+        // bigger than the saved work.  Profiled: low degrees ≤ 30 spend
         // microseconds total here, so going parallel is pure overhead.
         const PARALLEL_THRESHOLD: usize = 4;
 
         // Cap how many proposers we run concurrently.  18 is the largest
-        // row-size we observe through stem 40; more cores than that gives
+        // row-size we observe through degree 40; more cores than that gives
         // diminishing returns and oversubscribes the OS scheduler when
         // we're also doing work in the main thread.
         let n_workers: usize = std::thread::available_parallelism()
@@ -658,8 +661,8 @@ impl CurtisTable {
         if !any { out.push_str(&format!("  {}(none){}\n", c.dim, c.rst)); }
         out.push('\n');
 
-        // ── 2. Per-stem detail ──────────────────────────────────────────────
-        out.push_str(&section("Detail by stem"));
+        // ── 2. Per-degree detail ──────────────────────────────────────────────
+        out.push_str(&section("Detail by degree"));
         for k in 0..=max_stem {
             let col = match self.entries.get(&k) {
                 Some(c) => c,
@@ -1515,7 +1518,7 @@ impl DebugSession {
                     .find_source_of_target(tail)
                     .map(|s| format_seq(&s))
                     .unwrap_or_else(|| "?".into());
-                format!("   ← source {} (stem={}, row={})", src, st, sr)
+                format!("   ← source {} (deg={}, row={})", src, st, sr)
             } else {
                 String::new()
             };

@@ -8,3 +8,5 @@ report*.json
 report*.txt
 *out.json
 curtis*.png
+.DS_Store
+checkpoints_run/

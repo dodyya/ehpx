@@ -3,12 +3,12 @@
 Visualize a Curtis table report as a bidegree chart.
 
 Usage:
-    python3 visualize_table.py report.json [output.png]
+    python3 visualize_classes.py report.json [output.png]
 
 Expects the JSON format emitted by `cargo run --bin table -- --json`.
 Writes a PNG (or any format matplotlib supports, inferred from extension).
 
-Layout: x-axis = stem (t-s), y-axis = filtration (n).  Each entry is a
+Layout: x-axis = degree, y-axis = filtration (n).  Each entry is a
 dot; multiple entries in the same bidegree stack vertically inside the
 cell, ordered by admissible-sequence length with the shortest monomials
 at the visual bottom of the cell (matches the Adams spectral sequence
@@ -70,7 +70,7 @@ def main():
         by_cell[(e["stem"], e["row"])].append(e)
 
     # Map each entry to a plot (x, y) position so arrows find the right dots.
-    # Points sit INSIDE cells (not at grid intersections): stem k cell spans
+    # Points sit INSIDE cells (not at grid intersections): degree-k cell spans
     # x ∈ [k, k+1] with center x = k + 0.5.
     #
     # Vertical layout: rows are *not* uniform height.  Each row's height is
@@ -115,13 +115,13 @@ def main():
     # Dots sit near the LEFT edge of each cell (not the center) so the
     # right-of-dot label has the full remaining cell width to extend into
     # before bumping the next column's content.  Columns themselves
-    # stretch horizontally to fit the longest label in that stem — a
+    # stretch horizontally to fit the longest label in that degree — a
     # column whose busiest entry is `λ(2,4,1,1,1,3,3,3)` is wider than
     # one whose worst case is `λ(0)`, so labels stay inside their cell.
     DOT_X_OFFSET = 0.10        # data-x from left edge of the cell to the dot
     PER_CHAR = 0.045           # data-x per character of the longest label
     LABEL_PADDING = 0.10       # extra space after the label (to next col)
-    MIN_COL_WIDTH = 1.0        # baseline column width for short-label stems
+    MIN_COL_WIDTH = 1.0        # baseline column width for short-label degrees
 
     col_max_chars = defaultdict(int)
     for e in entries:
@@ -193,7 +193,7 @@ def main():
         )
 
     # Differentials: straight, headless lines from source → target.  The
-    # density at high stems makes arrowheads + curves illegible; a thin
+    # density at high degrees makes arrowheads + curves illegible; a thin
     # gray segment is enough to pair source with target by eye.
     for d in diffs:
         src_stem = sum(d["src"])
@@ -214,13 +214,13 @@ def main():
         )
 
     # Axes + grid.  Labels sit at cell centers; the actual grid lines run
-    # along the cell boundaries (minor ticks) so each (stem, row) bidegree
+    # along the cell boundaries (minor ticks) so each (degree, row) bidegree
     # reads as a distinct box.
-    ax.set_xlabel("stem  (t − s)")
+    ax.set_xlabel("degree")
     ax.set_ylabel("filtration  n")
-    ax.set_title(f"Curtis table through stem {max_stem}")
+    ax.set_title(f"Curtis table through degree {max_stem}")
 
-    # Major ticks: stem/row labels at the center of each variable cell.
+    # Major ticks: degree/row labels at the center of each variable cell.
     ax.set_xticks([(col_left[k] + col_right[k]) / 2 for k in range(max_stem + 1)])
     ax.set_xticklabels([str(k) for k in range(max_stem + 1)])
     ax.set_yticks([(row_top[r] + row_bot[r]) / 2 for r in range(1, max_row + 1)])

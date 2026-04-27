@@ -5,10 +5,10 @@ use std::process::ExitCode;
 
 fn usage() -> &'static str {
     "\
-usage: table [MAX_STEM] [options]
+usage: table [MAX_DEGREE] [options]
 
 positional:
-  MAX_STEM        run Curtis algorithm through this stem (default 12)
+  MAX_DEGREE      run Curtis algorithm through this degree (default 12)
 
 options:
   --plain         no ANSI color; Unicode (λ, →).  Default when writing to file
@@ -18,12 +18,12 @@ options:
   --color         force ANSI color (default when stdout is a terminal).
   --json          emit machine-readable JSON instead of the human report.
   --from PATH     resume from a previously-emitted JSON state file; extends
-                  the saved computation up to MAX_STEM.  MAX_STEM must be
-                  ≥ the saved max_stem.  Output format / destination still
+                  the saved computation up to MAX_DEGREE.  MAX_DEGREE must be
+                  ≥ the saved max degree.  Output format / destination still
                   controlled by the flags above.
   --checkpoint-dir DIR
-                  after each stem completes, write DIR/state_kk.json with
-                  the full state through that stem.  Safe to Ctrl-C at any
+                  after each degree completes, write DIR/state_kk.json with
+                  the full state through that degree.  Safe to Ctrl-C at any
                   point and resume with `--from DIR/state_kk.json`.  DIR
                   is created if it doesn't exist.
   -o, --output PATH
@@ -166,10 +166,10 @@ fn main() -> ExitCode {
         }
     }
 
-    // Build the starting table and figure out which stem to begin stepping from.
-    //   fresh:   new() → stem 0 not yet processed, start_k = 0
+    // Build the starting table and figure out which degree to begin stepping from.
+    //   fresh:   new() → degree 0 not yet processed, start_k = 0
     //   resumed: from_json has max_stem set, start_k = max_stem + 1
-    // A resumed table at or above MAX_STEM has nothing to do.
+    // A resumed table at or above MAX_DEGREE has nothing to do.
     let (mut table, start_k, resumed) = match &args.resume_from {
         Some(path) => {
             let src = match std::fs::read_to_string(path) {
@@ -188,19 +188,19 @@ fn main() -> ExitCode {
             };
             if args.max_stem < t.max_stem {
                 eprintln!(
-                    "MAX_STEM ({}) < saved max_stem ({}); cannot shrink.",
+                    "MAX_DEGREE ({}) < saved max degree ({}); cannot shrink.",
                     args.max_stem, t.max_stem
                 );
                 return ExitCode::from(2);
             }
             if args.max_stem == t.max_stem {
                 eprintln!(
-                    "Loaded state from {} (stem {}); nothing to extend.",
+                    "Loaded state from {} (degree {}); nothing to extend.",
                     path.display(), t.max_stem
                 );
             } else {
                 eprintln!(
-                    "Loaded state from {} (stem {}); extending to stem {}...",
+                    "Loaded state from {} (degree {}); extending to degree {}...",
                     path.display(), t.max_stem, args.max_stem
                 );
             }
@@ -208,12 +208,12 @@ fn main() -> ExitCode {
             (t, start, true)
         }
         None => {
-            eprintln!("Computing Curtis table through stem {}...", args.max_stem);
+            eprintln!("Computing Curtis table through degree {}...", args.max_stem);
             (CurtisTable::new(), 0, false)
         }
     };
 
-    // Drive stem-by-stem so we can checkpoint (and report progress) after each.
+    // Drive degree-by-degree so we can checkpoint (and report progress) after each.
     // `resumed && start_k > args.max_stem` means we loaded exactly what was asked
     // for; the loop body runs zero times and that's fine.
     for k in start_k..=args.max_stem {
@@ -229,11 +229,11 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
             eprintln!(
-                "  stem {:>2}: {:.2}s  → {} ({} bytes)",
+                "  degree {:>2}: {:.2}s  → {} ({} bytes)",
                 k, dt.as_secs_f64(), path.display(), json.len()
             );
         } else {
-            eprintln!("  stem {:>2}: {:.2}s", k, dt.as_secs_f64());
+            eprintln!("  degree {:>2}: {:.2}s", k, dt.as_secs_f64());
         }
     }
     let _ = resumed; // silence unused-var if we don't act on it
