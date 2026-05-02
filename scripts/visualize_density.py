@@ -135,14 +135,14 @@ def main():
 
     # Axes + grid.  Major ticks label the cell centers; minor ticks at
     # integer boundaries draw the cell edges.
-    ax.set_xlabel("degree")
-    ax.set_ylabel("filtration  n")
-    ax.set_title(f"Curtis table density through degree {max_stem}")
+    ax.set_xlabel("degree", fontsize=20)
+    ax.set_ylabel("filtration  n", fontsize=20)
+    ax.set_title(f"Curtis table density through degree {max_stem}", fontsize=22)
 
     ax.set_xticks([k + 0.5 for k in range(max_stem + 1)])
-    ax.set_xticklabels([str(k) for k in range(max_stem + 1)], fontsize=7)
+    ax.set_xticklabels([str(k) for k in range(max_stem + 1)], fontsize=15)
     ax.set_yticks([r - 0.5 for r in range(1, max_row + 1)])
-    ax.set_yticklabels([str(r) for r in range(1, max_row + 1)], fontsize=7)
+    ax.set_yticklabels([str(r) for r in range(1, max_row + 1)], fontsize=15)
     ax.tick_params(which="major", length=0)
 
     ax.set_xticks(range(0, max_stem + 2), minor=True)
@@ -162,7 +162,7 @@ def main():
         mpatches.Patch(color=ROLE_COLOR["source"], label="source of differential"),
         mpatches.Patch(color=ROLE_COLOR["target"], label="target of differential"),
     ]
-    ax.legend(handles=handles, loc="upper left", fontsize=8, framealpha=0.9)
+    ax.legend(handles=handles, loc="lower left", fontsize=14, framealpha=0.9)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)

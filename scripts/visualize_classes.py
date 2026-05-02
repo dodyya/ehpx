@@ -85,7 +85,7 @@ def main():
     # (`set_ylim(total_h, 0)`), so "visual bottom" = *larger* data y.
 
     CELL_MARGIN = 0.15      # padding from cell edges (data-y units)
-    PER_ENTRY = 0.28        # extra row height per entry beyond the first
+    PER_ENTRY = 0.45        # extra row height per entry beyond the first
     MIN_ROW_HEIGHT = 1.0    # baseline row height for sparse rows
 
     # How tall does each row need to be?  Driven by the densest cell on it.
@@ -119,8 +119,8 @@ def main():
     # column whose busiest entry is `λ(2,4,1,1,1,3,3,3)` is wider than
     # one whose worst case is `λ(0)`, so labels stay inside their cell.
     DOT_X_OFFSET = 0.10        # data-x from left edge of the cell to the dot
-    PER_CHAR = 0.045           # data-x per character of the longest label
-    LABEL_PADDING = 0.10       # extra space after the label (to next col)
+    PER_CHAR = 0.075           # data-x per character of the longest label
+    LABEL_PADDING = 0.15       # extra space after the label (to next col)
     MIN_COL_WIDTH = 1.0        # baseline column width for short-label degrees
 
     col_max_chars = defaultdict(int)
@@ -178,17 +178,17 @@ def main():
     for e in entries:
         x, y = pos[(e["stem"], e["row"], tuple(e["seq"]))]
         color = ROLE_COLOR.get(e["role"], "#444")
-        ax.plot(x, y, "o", color=color, markersize=5, zorder=3)
+        ax.plot(x, y, "o", color=color, markersize=7, zorder=3)
         label = format_seq(e["seq"])
         ax.annotate(
             label,
             (x, y),
-            xytext=(5, 0),
+            xytext=(6, 0),
             textcoords="offset points",
-            fontsize=5.5,
+            fontsize=10,
             color="#333",
             zorder=4,
-            alpha=0.9,
+            alpha=0.92,
             va="center",
         )
 
@@ -216,15 +216,15 @@ def main():
     # Axes + grid.  Labels sit at cell centers; the actual grid lines run
     # along the cell boundaries (minor ticks) so each (degree, row) bidegree
     # reads as a distinct box.
-    ax.set_xlabel("degree")
-    ax.set_ylabel("filtration  n")
-    ax.set_title(f"Curtis table through degree {max_stem}")
+    ax.set_xlabel("degree", fontsize=20)
+    ax.set_ylabel("filtration  n", fontsize=20)
+    ax.set_title(f"Curtis table through degree {max_stem}", fontsize=22)
 
     # Major ticks: degree/row labels at the center of each variable cell.
     ax.set_xticks([(col_left[k] + col_right[k]) / 2 for k in range(max_stem + 1)])
-    ax.set_xticklabels([str(k) for k in range(max_stem + 1)])
+    ax.set_xticklabels([str(k) for k in range(max_stem + 1)], fontsize=15)
     ax.set_yticks([(row_top[r] + row_bot[r]) / 2 for r in range(1, max_row + 1)])
-    ax.set_yticklabels([str(r) for r in range(1, max_row + 1)])
+    ax.set_yticklabels([str(r) for r in range(1, max_row + 1)], fontsize=15)
     ax.tick_params(which="major", length=0)  # hide major tick marks
 
     # Minor ticks: cell-boundary gridlines.  Both axes follow the
@@ -249,7 +249,7 @@ def main():
         mpatches.Patch(color=ROLE_COLOR["source"], label="source of differential"),
         mpatches.Patch(color=ROLE_COLOR["target"], label="target of differential"),
     ]
-    ax.legend(handles=handles, loc="upper left", fontsize=8, framealpha=0.9)
+    ax.legend(handles=handles, loc="lower left", fontsize=14, framealpha=0.9)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
