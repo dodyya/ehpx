@@ -1,0 +1,14 @@
+{
+  "max_stem": 0,
+  "entries": [
+    {"stem": 0, "row": 1, "seq": [], "role": "cycle"},
+    {"stem": 0, "row": 1, "seq": [0], "role": "cycle"}
+  ],
+  "differentials": [
+
+  ],
+  "survivors": [
+    {"stem": 0, "row": 1, "seq": []},
+    {"stem": 0, "row": 1, "seq": [0]}
+  ]
+}

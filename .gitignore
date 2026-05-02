@@ -9,4 +9,7 @@ report*.txt
 *out.json
 curtis*.png
 .DS_Store
-checkpoints_run/
+
+# but DO ship the curated multiples-of-ten checkpoints under checkpoints_run/
+!checkpoints_run/
+!checkpoints_run/state_*.json
