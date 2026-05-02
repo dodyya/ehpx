@@ -1,4 +1,6 @@
-<img width="3500" height="1900" alt="curtis" src="https://github.com/user-attachments/assets/1e49f4cd-cfbf-4ed5-ae7d-be7c60dd7286" />
+<img width="2677" height="2677" alt="curtis_50_density" src="https://github.com/user-attachments/assets/afae4cd0-4b12-4faf-95f9-1b010a797fe6" />
+
+
 
 # ehpx
 
