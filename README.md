@@ -18,6 +18,12 @@ Monomials admit a grading by taking the sum of all elements in a sequence. Accor
 ## TL;DR
 This is kind of just using dynamic programming, enabled by some mathematical considerations (AEHP) to efficiently compute a property (homology) of an esoteric object (Lambda-algebra) that tells us something about another object (stable homotopy groups of spheres), that is somewhat close to an object of interest (homotopy groups of spheres) for algebraic topologists (nerds).
 
+## Poster
+
+Presented at the IML Spring 2026 poster session. Click for the full-resolution PDF.
+
+[![Computing with the EHP Sequence poster](https://github.com/dodyya/ehpx/releases/download/poster-spring-2026/poster.png)](https://github.com/dodyya/ehpx/releases/download/poster-spring-2026/poster.pdf)
+
 ## Build
 
 ```sh
